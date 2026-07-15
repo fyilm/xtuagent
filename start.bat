@@ -106,7 +106,7 @@ set MKL_NUM_THREADS=1
 set TOKENIZERS_PARALLELISM=false
 set HF_HUB_OFFLINE=1
 set TRANSFORMERS_OFFLINE=1
-uv run python scripts/status.py
+uv run python scripts/run_status.py
 echo.
 pause
 goto menu
