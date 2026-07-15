@@ -1,10 +1,13 @@
 #!/usr/bin/env python
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+_ROOT = Path(__file__).resolve().parent.parent
+os.chdir(str(_ROOT))
+sys.path.insert(0, str(_ROOT / "src"))
 
 from xtuagent.config import config
 from xtuagent.crawler.spider import Spider

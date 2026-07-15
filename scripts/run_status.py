@@ -1,6 +1,8 @@
-import sys
+import sys, os
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
+_ROOT = Path(__file__).resolve().parent.parent
+os.chdir(str(_ROOT))
+sys.path.insert(0, str(_ROOT / "src"))
 
 from xtuagent.config import config
 from xtuagent.vector_store import load_vector_store
