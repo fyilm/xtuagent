@@ -13,6 +13,35 @@ from .site_config import CRAWL_RULES
 logger = logging.getLogger(__name__)
 
 
+def _decode_content(resp: requests.Response) -> str:
+    raw = resp.content
+    enc = resp.encoding
+    match = re.search(rb'charset[\s]*=[\s]*"?([^";\s]+)', raw[:5000])
+    if match:
+        enc = match.group(1).decode("ascii", errors="ignore").lower()
+    if enc in ("gb2312", "gb231280"):
+        enc = "gbk"
+    candidates = ["gbk", "utf-8"] if enc == "gbk" else ["utf-8", "gbk"]
+
+    best_text, best_score = None, -1
+    for e in candidates:
+        text = raw.decode(e, errors="replace")
+        non_ascii = sum(1 for c in text if ord(c) > 127)
+        if non_ascii == 0:
+            score = 0
+        else:
+            cjk = sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
+            noise = sum(1 for c in text if "\u0400" <= c <= "\u04FF")
+            noise += sum(1 for c in text if "\u0370" <= c <= "\u03FF")
+            noise += text.count("\ufffd")
+            score = cjk / max(non_ascii, 1)
+            if noise > 0:
+                score /= 1 + noise * 10
+        if score > best_score:
+            best_score, best_text = score, text
+    return (best_text or raw.decode("utf-8", errors="replace")).replace("\ufffd", " ")
+
+
 class Spider:
     def __init__(
         self,
@@ -48,7 +77,7 @@ class Spider:
         return any(lower.endswith(ft) for ft in self.file_types)
 
     def _is_content_page(self, url: str) -> bool:
-        return bool(re.search(r"/info/\d+/\d+\.htm", url))
+        return bool(re.search(r"(/info/\d+/\d+\.htm|/content/|/article/|\d+\.htm$|\d+\.html$)", url))
 
     def _extract_links(self, soup: BeautifulSoup, base_url: str) -> list[str]:
         links = []
@@ -65,15 +94,26 @@ class Spider:
             links.append(full_url)
         return links
 
-    def _extract_text(self, soup: BeautifulSoup, url: str) -> str:
-        for tag in soup(["script", "style", "nav", "footer", "header", "noscript", "iframe", "img", "input", "button"]):
-            tag.decompose()
-        body = soup.find("body")
-        if body is None:
-            body = soup
-        text = body.get_text(separator="\n", strip=True)
-        lines = [line for line in text.split("\n") if len(line.strip()) > 10]
-        return "\n".join(lines)
+    def _text_from_bytes(self, raw: bytes) -> str:
+        b = raw
+        b = re.sub(rb"<script[^>]*>.*?</script>", b" ", b, flags=re.DOTALL)
+        b = re.sub(rb"<style[^>]*>.*?</style>", b" ", b, flags=re.DOTALL)
+        b = re.sub(rb"<[^>]+>", b" ", b)
+        b = re.sub(rb"&[a-zA-Z]+;", b" ", b)
+        b = re.sub(rb"\s+", b" ", b).strip()
+        if len(b) < 50:
+            return ""
+
+        best_text, best_score = None, -1
+        for e in ["gbk", "utf-8", "gb18030"]:
+            text = b.decode(e, errors="replace").replace("\ufffd", " ")
+            cjk = sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
+            noise = sum(1 for c in text if "\u0400" <= c <= "\u04FF")
+            noise += sum(1 for c in text if "\u0370" <= c <= "\u03FF")
+            score = cjk / max(1, cjk + noise) if cjk + noise > 0 else 0
+            if score > best_score:
+                best_score, best_text = score, text
+        return best_text or ""
 
     def crawl(
         self, start_urls: list[str], output_dir: Optional[str] = None
@@ -119,19 +159,18 @@ class Spider:
                     if "text/html" not in content_type:
                         continue
 
-                    resp.encoding = resp.apparent_encoding
-                    soup = BeautifulSoup(resp.text, "lxml")
+                    soup = BeautifulSoup(resp.content.decode("utf-8", errors="replace"), "lxml")
                     page_links.append(url)
-
                     is_content = self._is_content_page(url)
                     marker = "*" if is_content else " "
                     logger.info("%s page: %s (depth=%d)", marker, url, depth)
 
-                    if output_dir and is_content and url not in self._content_saved:
-                        text = self._extract_text(soup, url)
-                        if text and len(text) > 100:
+                    if output_dir and url not in self._content_saved:
+                        text = self._text_from_bytes(resp.content)
+                        if text and len(text) > 200:
                             self._save_text(text, url, output_dir)
                             self._content_saved.add(url)
+                            logger.info("saved: %s (%d chars)", url, len(text))
 
                     if depth < self.max_depth:
                         child_links = self._extract_links(soup, url)
@@ -144,7 +183,8 @@ class Spider:
                 except requests.RequestException as e:
                     logger.warning("request failed: %s", e)
                     continue
-                except Exception:
+                except Exception as e:
+                    logger.warning("unexpected error at %s: %s", url, e)
                     continue
 
                 time.sleep(self.delay)
