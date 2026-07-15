@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.eggs/
+dist/
+build/
+
+# Virtual environment
+.venv/
+venv/
+
+# uv
+uv.lock
+
+# Data
+data/raw_pdfs/
+data/texts/
+data/chroma_db/
+docs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+*.env.local
