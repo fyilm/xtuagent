@@ -1,24 +1,30 @@
+"""Agent 协作：知识库检索 + 课程/考试/规定工具调度。"""
+
+import logging
+
 from langchain_core.tools import tool
-from langchain.agents import create_agent
+
+logger = logging.getLogger(__name__)
+
+
+def _get_vector_store():
+    from .serving.container import container
+
+    if container.vector_store is None:
+        return None
+    return container.vector_store
 
 
 @tool
 def search_knowledge_base(query: str) -> str:
     """在知识库中搜索指定内容，返回相关的学业规定、政策或操作指南。"""
-    try:
-        from .vector_store import load_vector_store
-        from .retriever import search_similar
-
-        vs = load_vector_store()
-        if vs is None:
-            return "知识库尚未构建，请先运行文档入库操作。"
-        docs = search_similar(vs, query, top_k=3)
-        if not docs:
-            return "未找到相关信息。"
-        results = [doc.page_content[:500] for doc in docs]
-        return "\n\n---\n\n".join(results)
-    except Exception as e:
-        return f"知识库搜索失败: {e}"
+    vs = _get_vector_store()
+    if vs is None:
+        return "知识库尚未就绪，请稍后再试。"
+    docs = vs.search(query, top_k=3)
+    if not docs:
+        return "未找到相关信息。"
+    return "\n\n---\n\n".join(d.content[:500] for d in docs)
 
 
 @tool
@@ -37,12 +43,12 @@ def course_schedule(course_name: str) -> str:
     for key, value in mock_data.items():
         if key in course_name:
             return f"《{key}》：{value}"
-    return f"未找到《{course_name}》的课程信息，请确认课程名称是否准确。实际部署时可对接教务系统API获取实时数据。"
+    return f"未找到《{course_name}》的课程信息，请确认课程名称是否准确。"
 
 
 @tool
 def exam_schedule(course_name: str) -> str:
-    """查询指定课程的期末考试时间和地点。"""
+    """查询指定课程的期末考试时间和地点。课程名请使用准确的全称。"""
     mock_data = {
         "机器学习": "2025年1月8日 14:00-16:00，逸夫楼101",
         "高等数学": "2025年1月6日 08:30-10:30，逸夫楼201",
@@ -59,21 +65,17 @@ def exam_schedule(course_name: str) -> str:
 @tool
 def regulation_lookup(regulation_name: str) -> str:
     """精确查找某条学业规定、校规或政策的原文。"""
-    try:
-        from .vector_store import load_vector_store
-        from .retriever import search_similar
-
-        vs = load_vector_store()
-        if vs is None:
-            return "知识库尚未构建。"
-        docs = search_similar(vs, regulation_name, top_k=1)
-        if docs and docs[0].page_content.strip():
-            snippet = docs[0].page_content[:800]
-            source = docs[0].metadata.get("source_file", "未知来源")
-            return f"来源：{source}\n\n{snippet}\n\n---\n提示：以上为知识库检索结果，请以学校官方最新文件为准。"
-        return f"未找到关于「{regulation_name}」的规定原文。"
-    except Exception as e:
-        return f"规定查询失败: {e}"
+    vs = _get_vector_store()
+    if vs is None:
+        return "知识库尚未就绪，请稍后再试。"
+    docs = vs.search(regulation_name, top_k=1)
+    if docs and docs[0].content.strip():
+        doc = docs[0]
+        return (
+            f"来源：{doc.source}\n\n{doc.content[:800]}\n\n---\n"
+            "提示：以上为知识库检索结果，请以学校官方最新文件为准。"
+        )
+    return f"未找到关于「{regulation_name}」的规定原文。"
 
 
 AGENT_TOOLS = [search_knowledge_base, course_schedule, exam_schedule, regulation_lookup]
@@ -91,17 +93,23 @@ AGENT_SYSTEM_PROMPT = """你是湘潭大学智能学业助手，你可以：
 
 
 class AgentAssistant:
-    def __init__(self):
-        from .llm import get_chat_model
-        self._model = get_chat_model()
+    """基于 ReAct Agent 的智能助手（工具调用）。"""
+
+    def __init__(self) -> None:
+        from langchain.agents import create_agent
+
+        from .rag.llm import create_llm
+
         self._agent = create_agent(
-            model=self._model,
+            model=create_llm(),
             tools=AGENT_TOOLS,
             system_prompt=AGENT_SYSTEM_PROMPT,
         )
 
     def run(self, user_input: str) -> str:
-        result = self._agent.invoke({"messages": [{"role": "user", "content": user_input}]})
+        result = self._agent.invoke(
+            {"messages": [{"role": "user", "content": user_input}]}
+        )
         messages = result.get("messages", [])
         if messages:
             last = messages[-1]

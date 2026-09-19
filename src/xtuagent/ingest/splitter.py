@@ -1,21 +1,21 @@
+"""语义分块：RecursiveCharacterTextSplitter 中文优化。"""
+
 import logging
+
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from .config import config
+from ..core.config import settings
 
 logger = logging.getLogger(__name__)
 
 
 def create_splitter(
-    chunk_size: int = 0,
-    chunk_overlap: int = 0,
+    chunk_size: int | None = None,
+    chunk_overlap: int | None = None,
 ) -> RecursiveCharacterTextSplitter:
-    chunk_size = chunk_size or config.chunk_size
-    chunk_overlap = chunk_overlap or config.chunk_overlap
-
     return RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
+        chunk_size=chunk_size if chunk_size is not None else settings.chunk_size,
+        chunk_overlap=chunk_overlap if chunk_overlap is not None else settings.chunk_overlap,
         separators=["\n\n", "\n", "。", "！", "？", "；", ".", "!", "?", ";", " ", ""],
         length_function=len,
         is_separator_regex=False,
@@ -25,5 +25,5 @@ def create_splitter(
 def split_documents(documents: list) -> list:
     splitter = create_splitter()
     chunks = splitter.split_documents(documents)
-    logger.info("split into %d chunks (size=%d, overlap=%d)", len(chunks), config.chunk_size, config.chunk_overlap)
+    logger.info("分块完成：%d 个文本块（大小 %d / 重叠 %d）", len(chunks), settings.chunk_size, settings.chunk_overlap)
     return chunks

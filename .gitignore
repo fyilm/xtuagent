@@ -5,6 +5,7 @@ __pycache__/
 .eggs/
 dist/
 build/
+.pytest_cache/
 
 # Virtual environment
 .venv/
@@ -16,8 +17,12 @@ uv.lock
 # Data
 data/raw_pdfs/
 data/texts/
-data/chroma_db/
+data/index/
 docs/
+
+# Logs
+logs/
+*.log
 
 # IDE
 .vscode/
@@ -32,4 +37,7 @@ Thumbs.db
 # Environment
 .env
 *.env.local
-ingest_log.txt 
+
+# Misc
+homepage_test.txt
+ingest_log.txt
