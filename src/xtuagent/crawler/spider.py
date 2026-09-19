@@ -1,4 +1,5 @@
 import re
+import socket
 import time
 import logging
 from urllib.parse import urljoin, urlparse
@@ -12,34 +13,27 @@ from .site_config import CRAWL_RULES
 
 logger = logging.getLogger(__name__)
 
+_ipv4_forced = False
 
-def _decode_content(resp: requests.Response) -> str:
-    raw = resp.content
-    enc = resp.encoding
-    match = re.search(rb'charset[\s]*=[\s]*"?([^";\s]+)', raw[:5000])
-    if match:
-        enc = match.group(1).decode("ascii", errors="ignore").lower()
-    if enc in ("gb2312", "gb231280"):
-        enc = "gbk"
-    candidates = ["gbk", "utf-8"] if enc == "gbk" else ["utf-8", "gbk"]
 
-    best_text, best_score = None, -1
-    for e in candidates:
-        text = raw.decode(e, errors="replace")
-        non_ascii = sum(1 for c in text if ord(c) > 127)
-        if non_ascii == 0:
-            score = 0
-        else:
-            cjk = sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
-            noise = sum(1 for c in text if "\u0400" <= c <= "\u04FF")
-            noise += sum(1 for c in text if "\u0370" <= c <= "\u03FF")
-            noise += text.count("\ufffd")
-            score = cjk / max(non_ascii, 1)
-            if noise > 0:
-                score /= 1 + noise * 10
-        if score > best_score:
-            best_score, best_text = score, text
-    return (best_text or raw.decode("utf-8", errors="replace")).replace("\ufffd", " ")
+def force_ipv4() -> None:
+    """强制 IPv4 解析。
+
+    教育网站点常同时解析出 IPv6 地址（如 2001:da8::/32），
+    在部分网络环境下 IPv6 不可达会导致全部请求超时。
+    此函数将进程内 DNS 解析限制为 IPv4。
+    """
+    global _ipv4_forced
+    if _ipv4_forced:
+        return
+    _ipv4_forced = True
+
+    original_getaddrinfo = socket.getaddrinfo
+
+    def ipv4_only(host, port, family=0, type=0, proto=0, flags=0):
+        return original_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+
+    socket.getaddrinfo = ipv4_only
 
 
 class Spider:
@@ -51,7 +45,10 @@ class Spider:
         timeout: int = 30,
         allowed_domains: Optional[list[str]] = None,
         file_types: Optional[list[str]] = None,
+        prefer_ipv4: bool = True,
     ):
+        if prefer_ipv4:
+            force_ipv4()
         self.max_depth = max_depth
         self.max_pages_per_site = max_pages_per_site
         self.delay = delay
