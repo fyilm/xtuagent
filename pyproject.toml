@@ -1,7 +1,7 @@
 [project]
 name = "xtuagent"
 version = "0.1.0"
-description = "基于RAG架构的湘潭大学智能学业问答助手"
+description = "基于RAG的校园智能学业问答系统设计与实现"
 requires-python = ">=3.11"
 dependencies = [
     "langchain>=0.3.0",
