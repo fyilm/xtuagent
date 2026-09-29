@@ -169,7 +169,7 @@ def main() -> None:
         f"{WARN} 检索参数 — top_k={settings.retriever_top_k}，"
         f"阈值={settings.retriever_score_threshold}，"
         f"同源上限={settings.retriever_max_per_source}，"
-        f"chunk={settings.chunk_size}/{settings.chunk_overlap}"
+        f"chunk={settings.chunk_size}/{settings.chunk_overlap} token"
     )
 
     # 汇总

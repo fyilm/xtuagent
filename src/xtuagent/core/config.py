@@ -55,7 +55,11 @@ class Settings(BaseSettings):
     web_dir: Path = PROJECT_ROOT / "web"
 
     # RAG 参数
-    chunk_size: int = 800
+    # ⚠️ chunk_size / chunk_overlap 的单位是 **token**，不是字符。
+    # 必须按 token 计数：bge-base-zh 的 max_seq_length=512，中文约 1 字 1 token，
+    # 早先按字符切 800 会让 52% 的块超限被静默截断（详见 ingest/splitter.py）。
+    # 取 500 而非 512，是给 tokenizer 自动补的 [CLS]/[SEP] 留 2 个 token 余量。
+    chunk_size: int = 500
     chunk_overlap: int = 50
     retriever_top_k: int = 5
     # 相关性阈值（余弦相似度）。**默认 0 表示关闭过滤**，检索始终返回 top_k。
