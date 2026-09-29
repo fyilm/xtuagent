@@ -4,6 +4,7 @@ const API = {
   health: "/health",
   stats: "/api/stats",
   askStream: "/api/ask/stream",
+  agent: "/api/agent",
 };
 
 const state = {
@@ -19,6 +20,7 @@ const els = {
   statusText: $("statusText"),
   statusSub: $("statusSub"),
   langSelect: $("langSelect"),
+  agentToggle: $("agentToggle"),
   examples: $("examples"),
   clearBtn: $("clearBtn"),
   messages: $("messages"),
@@ -26,6 +28,7 @@ const els = {
   input: $("input"),
   sendBtn: $("sendBtn"),
   toast: $("toast"),
+  techNote: $("techNote"),
 };
 
 const EXAMPLES = [
@@ -82,10 +85,10 @@ async function init() {
   try {
     const resp = await fetch(API.stats);
     const data = await resp.json();
-    if (data.meta) {
-      document.querySelector(".tech-note").textContent =
-        `${data.meta.embedding_model} · ${data.count} 向量 · GLM-4-Flash`;
-    }
+    const model = (data.meta && data.meta.embedding_model) || data.embedding_model || "bge-base-zh";
+    const short = model.split("/").pop();
+    els.techNote.textContent =
+      `${short} · 阈值 ${data.score_threshold ?? "-"} · ${data.model || "GLM"}`;
   } catch { /* 忽略 */ }
 }
 
@@ -222,7 +225,21 @@ function showToast(message) {
   setTimeout(() => els.toast.classList.remove("show"), 3200);
 }
 
-/* ============ 流式问答 ============ */
+/* ============ 问答主流程 ============ */
+
+function makeTyping() {
+  const typing = document.createElement("div");
+  typing.className = "typing";
+  typing.innerHTML = "<span></span><span></span><span></span>";
+  return typing;
+}
+
+function appendMeta(body, text) {
+  const meta = document.createElement("div");
+  meta.className = "msg-meta";
+  meta.textContent = text;
+  body.appendChild(meta);
+}
 
 async function send() {
   const question = els.input.value.trim();
@@ -239,91 +256,137 @@ async function send() {
 
   appendMessage("user", question);
   const { body, contentEl } = appendMessage("assistant", "");
-
-  const typing = document.createElement("div");
-  typing.className = "typing";
-  typing.innerHTML = "<span></span><span></span><span></span>";
+  const typing = makeTyping();
   contentEl.appendChild(typing);
 
-  let answerText = "";
-  let sources = [];
+  const ctx = { question, body, contentEl, typing };
 
   try {
-    const resp = await fetch(API.askStream, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        question,
-        language: els.langSelect.value,
-      }),
-    });
-
-    if (!resp.ok) {
-      const detail = await resp.json().catch(() => ({}));
-      throw new Error(detail.detail || `请求失败 (${resp.status})`);
+    if (els.agentToggle.checked) {
+      await runAgentMode(ctx);
+    } else {
+      await runStreamMode(ctx);
     }
-
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder("utf-8");
-    let buffer = "";
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-
-      const frames = buffer.split("\n\n");
-      buffer = frames.pop();
-
-      for (const frame of frames) {
-        const line = frame.split("\n").find((l) => l.startsWith("data: "));
-        if (!line) continue;
-        let event;
-        try {
-          event = JSON.parse(line.slice(6));
-        } catch {
-          continue;
-        }
-        handleEvent(event, { body, contentEl, typing, get answerText() { return answerText; },
-          set answerText(v) { answerText = v; },
-          get sources() { return sources; },
-          set sources(v) { sources = v; },
-        });
-      }
-    }
-  } catch (error) {
-    typing.remove();
-    contentEl.innerHTML = `<p style="color:#f87171">出错了：${escapeHtml(error.message)}</p>`;
   } finally {
-    typing.remove();
+    if (typing.parentNode) typing.remove();
     state.streaming = false;
     els.sendBtn.disabled = false;
     els.input.focus();
   }
+}
 
-  function handleEvent(event, ctx) {
-    if (event.type === "sources") {
-      ctx.sources = event.sources || [];
-    } else if (event.type === "delta") {
-      if (ctx.typing.parentNode) ctx.typing.remove();
-      ctx.answerText += event.text;
-      ctx.contentEl.innerHTML = renderMarkdown(ctx.answerText) + '<span class="cursor"></span>';
-      scrollToBottom();
-    } else if (event.type === "done") {
-      if (ctx.typing.parentNode) ctx.typing.remove();
-      ctx.contentEl.innerHTML = renderMarkdown(ctx.answerText);
-      if (ctx.sources.length) renderSources(ctx.body, ctx.sources);
-      const meta = document.createElement("div");
-      meta.className = "msg-meta";
-      meta.textContent = `耗时 ${(event.elapsed_ms / 1000).toFixed(1)}s · 检索 ${ctx.sources.length} 条来源`;
-      ctx.body.appendChild(meta);
-      scrollToBottom();
-    } else if (event.type === "error") {
-      if (ctx.typing.parentNode) ctx.typing.remove();
-      ctx.contentEl.innerHTML = `<p style="color:#f87171">生成失败：${escapeHtml(event.message)}</p>`;
+/* ---------- 模式一：普通 RAG 流式问答 ---------- */
+
+async function runStreamMode(ctx) {
+  const { question, body, contentEl, typing } = ctx;
+  let answerText = "";
+  let sources = [];
+
+  const resp = await fetch(API.askStream, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ question, language: els.langSelect.value }),
+  });
+
+  if (!resp.ok) {
+    const detail = await resp.json().catch(() => ({}));
+    typing.remove();
+    contentEl.innerHTML = `<p style="color:#f87171">出错了：${escapeHtml(detail.detail || `请求失败 (${resp.status})`)}</p>`;
+    return;
+  }
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    const frames = buffer.split("\n\n");
+    buffer = frames.pop();
+
+    for (const frame of frames) {
+      const line = frame.split("\n").find((l) => l.startsWith("data: "));
+      if (!line) continue;
+      let event;
+      try {
+        event = JSON.parse(line.slice(6));
+      } catch {
+        continue;
+      }
+      handleStreamEvent(event, {
+        body,
+        contentEl,
+        typing,
+        get answerText() { return answerText; },
+        set answerText(v) { answerText = v; },
+        get sources() { return sources; },
+        set sources(v) { sources = v; },
+      });
     }
   }
 }
+
+function handleStreamEvent(event, ctx) {
+  if (event.type === "sources") {
+    ctx.sources = event.sources || [];
+  } else if (event.type === "delta") {
+    if (ctx.typing.parentNode) ctx.typing.remove();
+    ctx.answerText += event.text;
+    ctx.contentEl.innerHTML = renderMarkdown(ctx.answerText) + '<span class="cursor"></span>';
+    scrollToBottom();
+  } else if (event.type === "done") {
+    if (ctx.typing.parentNode) ctx.typing.remove();
+    ctx.contentEl.innerHTML = renderMarkdown(ctx.answerText);
+    if (ctx.sources.length) renderSources(ctx.body, ctx.sources);
+    appendMeta(ctx.body, `耗时 ${(event.elapsed_ms / 1000).toFixed(1)}s · 检索 ${ctx.sources.length} 条来源`);
+    scrollToBottom();
+  } else if (event.type === "error") {
+    if (ctx.typing.parentNode) ctx.typing.remove();
+    ctx.contentEl.innerHTML = `<p style="color:#f87171">生成失败：${escapeHtml(event.message)}</p>`;
+  }
+}
+
+/* ---------- 模式二：工具增强（ReAct Agent，非流式） ---------- */
+
+async function runAgentMode(ctx) {
+  const { question, body, contentEl, typing } = ctx;
+  typing.remove();
+
+  const hint = document.createElement("div");
+  hint.className = "msg-meta";
+  hint.textContent = "工具增强模式：正在检索知识库…";
+  contentEl.appendChild(hint);
+  scrollToBottom();
+
+  let data;
+  try {
+    const resp = await fetch(API.agent, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question, language: els.langSelect.value }),
+    });
+    if (!resp.ok) {
+      const detail = await resp.json().catch(() => ({}));
+      throw new Error(detail.detail || `请求失败 (${resp.status})`);
+    }
+    data = await resp.json();
+  } catch (error) {
+    contentEl.innerHTML = `<p style="color:#f87171">出错了：${escapeHtml(error.message)}</p>`;
+    return;
+  }
+
+  contentEl.innerHTML = renderMarkdown(data.answer || "（无回答）");
+  if (data.sources && data.sources.length) renderSources(body, data.sources);
+  appendMeta(
+    body,
+    `耗时 ${((data.elapsed_ms || 0) / 1000).toFixed(1)}s · 工具检索命中 ${(data.sources || []).length} 条来源`
+  );
+  scrollToBottom();
+}
+
 
 /* ============ 输入框 ============ */
 

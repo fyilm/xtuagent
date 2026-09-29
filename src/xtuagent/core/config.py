@@ -58,16 +58,36 @@ class Settings(BaseSettings):
     chunk_size: int = 800
     chunk_overlap: int = 50
     retriever_top_k: int = 5
+    # 相关性阈值（余弦相似度）。**默认 0 表示关闭过滤**，检索始终返回 top_k。
+    #
+    # 为什么不默认开：BGE 中文模型的余弦分布会被压缩在很窄的高分区间，
+    # 且区间位置随语料变化很大。实测某校园语料：语料内问题 top-1 落在
+    # 0.67~0.69，语料外问题 top-1 落在 0.63~0.67，两者几乎完全重叠——
+    # 此时任何固定阈值要么滤掉全部、要么形同虚设。
+    #
+    # 因此是否拒答交给两层机制处理：
+    #   1) 提示词要求模型在知识库无足够信息时如实拒答（默认生效）；
+    #   2) 若你在自己的语料上标定出了可分离的阈值，再用本项显式开启。
+    # 标定方法：`uv run python scripts/eval_qa.py --skip-llm` 会打印
+    # 语料内/语料外问题的 top-1 分数分布，据此判断是否可分离。
+    retriever_score_threshold: float = 0.0
+    # 同一来源文件最多保留的片段数，避免上下文被单个长文档占满
+    retriever_max_per_source: int = 3
 
     # 服务
     host: str = "127.0.0.1"
     port: int = 8000
 
     # 爬虫
-    crawl_max_depth: int = 2
+    # 深度 2 时，作为二级链接被发现的子站（社科处、统战部、期刊社等）只会
+    # 抓到首页就不再展开，导致 30+ 个子站只贡献 1 篇文本。调到 3 才能覆盖。
+    crawl_max_depth: int = 3
     crawl_delay: float = 0.3
     crawl_timeout: int = 20
     crawl_max_pages_per_site: int = 60
+    # 单次运行的全局页数预算。整站爬取耗时很长，设上限可保证「每次运行都有边界」，
+    # 未爬完的部分会随断点状态保存，下次运行继续。
+    crawl_max_total_pages: int = 3000
 
     def ensure_dirs(self) -> None:
         for directory in (

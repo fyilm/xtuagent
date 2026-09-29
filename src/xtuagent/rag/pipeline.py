@@ -20,10 +20,10 @@ FALLBACK_ANSWER = "根据现有知识库暂未找到相关信息，建议咨询�
 
 SYSTEM_PROMPT = """你是湘潭大学（Xiangtan University）的智能学业助手，专门为学生提供准确的学业信息。
 
-请根据以下知识库内容回答问题。回答要求：
-1. 如果知识库中有相关信息，请准确、简洁地回答，必要时分点列出。
-2. 如果知识库中没有相关信息，请如实告知"根据现有知识库暂未找到相关信息，建议咨询教务处或辅导员"。
-3. 涉及政策规定时，请注明信息来源（如"根据《湘潭大学学生手册》……"）。
+请严格依据下面提供的知识库内容回答问题。回答要求：
+1. 只使用知识库中出现的信息。不要依赖你自己的先验知识补充细节（尤其是数字、日期、比例、人名）。
+2. 如果知识库中没有足够信息回答该问题，请如实回复"根据现有知识库暂未找到相关信息，建议咨询教务处或辅导员获取更详细的说明"，不要猜测。
+3. 回答准确、简洁，必要时分点列出，并在句末用 [编号] 标注信息来源（例如"平均学分绩点低于 1.5 会收到学业警告 [1]"）。
 4. 回答使用{language}语言。
 
 知识库内容：
@@ -56,8 +56,9 @@ class RAGPipeline:
             self._llm = create_llm()
         return self._llm
 
-    def retrieve(self, question: str) -> List[RetrievedDoc]:
-        return self._vs.search(question, self._top_k)
+    def retrieve(self, question: str, top_k: Optional[int] = None) -> List[RetrievedDoc]:
+        """检索并返回通过相关性阈值的结果（可能为空）。"""
+        return self._vs.search(question, top_k or self._top_k)
 
     def _build_chain(self, context: str, language: str):
         prompt = ChatPromptTemplate.from_messages(
@@ -80,10 +81,16 @@ class RAGPipeline:
                 time.sleep(wait)
         raise LLMInvocationError(str(last_error))
 
-    def ask(self, question: str, language: str = "中文") -> Answer:
+    def ask(
+        self,
+        question: str,
+        language: str = "中文",
+        top_k: Optional[int] = None,
+    ) -> Answer:
         start = time.time()
-        docs = self.retrieve(question)
+        docs = self.retrieve(question, top_k)
         if not docs:
+            logger.info("检索无结果或全部低于阈值，返回兜底回答：%s", question)
             return Answer(
                 text=FALLBACK_ANSWER,
                 sources=[],
@@ -98,10 +105,15 @@ class RAGPipeline:
             elapsed_ms=int((time.time() - start) * 1000),
         )
 
-    def ask_stream(self, question: str, language: str = "中文") -> Iterator[dict]:
+    def ask_stream(
+        self,
+        question: str,
+        language: str = "中文",
+        top_k: Optional[int] = None,
+    ) -> Iterator[dict]:
         """流式问答：依次产出 sources / delta / done 事件。"""
         start = time.time()
-        docs = self.retrieve(question)
+        docs = self.retrieve(question, top_k)
         yield {
             "type": "sources",
             "sources": [
@@ -111,6 +123,7 @@ class RAGPipeline:
         }
 
         if not docs:
+            logger.info("检索无结果或全部低于阈值，流式返回兜底回答：%s", question)
             yield {"type": "delta", "text": FALLBACK_ANSWER}
             yield {"type": "done", "elapsed_ms": int((time.time() - start) * 1000)}
             return

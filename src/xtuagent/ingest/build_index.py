@@ -19,11 +19,13 @@ def run_build(
     chunk_size: Optional[int] = None,
     chunk_overlap: Optional[int] = None,
 ) -> dict:
-    """执行完整索引构建流程，返回统计信息。"""
-    if chunk_size:
-        settings.chunk_size = chunk_size
-    if chunk_overlap:
-        settings.chunk_overlap = chunk_overlap
+    """执行完整索引构建流程，返回统计信息。
+
+    分块参数通过参数传递而非改写全局 `settings`：
+    避免一次调用永久污染后续同进程调用的配置（例如对比实验脚本）。
+    """
+    size = chunk_size if chunk_size is not None else settings.chunk_size
+    overlap = chunk_overlap if chunk_overlap is not None else settings.chunk_overlap
 
     start = time.time()
 
@@ -33,12 +35,18 @@ def run_build(
         raise RuntimeError(f"未找到任何文档：{docs_dir or settings.texts_dir}")
 
     logger.info("===== 2/3 语义分块 =====")
-    chunks = split_documents(documents)
+    chunks = split_documents(documents, chunk_size=size, chunk_overlap=overlap)
     if not chunks:
         raise RuntimeError("分块结果为空，请检查文档内容")
 
     logger.info("===== 3/3 嵌入并构建索引 =====")
-    service = build_faiss_index(chunks, index_dir=index_dir, documents=len(documents))
+    service = build_faiss_index(
+        chunks,
+        index_dir=index_dir,
+        documents=len(documents),
+        chunk_size=size,
+        chunk_overlap=overlap,
+    )
 
     elapsed = time.time() - start
     stats = {

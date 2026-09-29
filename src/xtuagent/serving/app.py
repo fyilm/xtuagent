@@ -2,14 +2,16 @@
 
 import json
 import logging
+import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from ..core.config import settings
+from ..core.exceptions import XtuAgentError
 from ..core.logging import setup_logging
 from .container import STATE_ERROR, STATE_READY, container
 from .schemas import AskRequest, AskResponse, HealthResponse, Source
@@ -47,6 +49,13 @@ def _require_ready() -> None:
         raise HTTPException(status_code=503, detail="服务正在预热，请稍候")
 
 
+@app.exception_handler(XtuAgentError)
+async def domain_error_handler(request: Request, exc: XtuAgentError) -> JSONResponse:
+    """领域异常统一降级为 503 + 可读原因（例如 API Key 未配置），而不是 500。"""
+    logger.warning("请求 %s 处理失败：%s", request.url.path, exc)
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     count = container.vector_store.count if container.vector_store else 0
@@ -61,16 +70,26 @@ def health() -> HealthResponse:
 
 @app.get("/api/stats")
 def stats() -> dict:
+    payload = {
+        "status": container.state,
+        "model": settings.zhipu_model,
+        "embedding_model": settings.embedding_model,
+        "top_k": settings.retriever_top_k,
+        "score_threshold": settings.retriever_score_threshold,
+    }
     if container.vector_store is None:
-        return {"status": container.state}
+        return payload
     info = container.vector_store.health()
-    return {"status": container.state, "count": info["count"], "meta": info["meta"]}
+    payload.update({"count": info["count"], "meta": info["meta"]})
+    return payload
 
 
 @app.post("/api/ask", response_model=AskResponse)
 def ask(req: AskRequest) -> AskResponse:
     _require_ready()
-    answer = container.pipeline.ask(req.question.strip(), req.language)
+    answer = container.pipeline.ask(
+        req.question.strip(), req.language, top_k=req.top_k
+    )
     return AskResponse(
         answer=answer.text,
         sources=[
@@ -87,7 +106,9 @@ def ask_stream(req: AskRequest) -> StreamingResponse:
 
     def event_stream():
         try:
-            for event in container.pipeline.ask_stream(req.question.strip(), req.language):
+            for event in container.pipeline.ask_stream(
+                req.question.strip(), req.language, top_k=req.top_k
+            ):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except Exception as exc:  # noqa: BLE001
             logger.exception("流式问答失败")
@@ -103,11 +124,24 @@ def ask_stream(req: AskRequest) -> StreamingResponse:
 
 @app.post("/api/agent")
 def agent_ask(req: AskRequest) -> dict:
-    _require_ready()
-    from ..agent import AgentAssistant
+    """工具增强问答（ReAct Agent，非流式）。
 
-    assistant = AgentAssistant()
-    return {"answer": assistant.run(req.question.strip())}
+    与 /api/ask 的区别：由模型自主决定是否调用检索/规定原文工具，
+    适合需要多步查找的问题。响应结构统一为 {answer, sources, elapsed_ms}。
+    """
+    _require_ready()
+    from ..agent import get_assistant
+
+    start = time.time()
+    result = get_assistant().run(req.question.strip())
+    return {
+        "answer": result.text,
+        "sources": [
+            {"file": s.source, "snippet": s.content[:160], "score": s.score}
+            for s in result.sources
+        ],
+        "elapsed_ms": int((time.time() - start) * 1000),
+    }
 
 
 if settings.web_dir.exists():

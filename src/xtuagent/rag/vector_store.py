@@ -1,12 +1,13 @@
 """FAISS 向量库服务：构建、加载、检索、元数据校验。"""
 
+import contextlib
 import hashlib
 import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 from langchain_community.vectorstores import FAISS
@@ -24,7 +25,7 @@ META_FILE = "index_meta.json"
 
 @dataclass
 class RetrievedDoc:
-    """检索结果。score 为 (0,1] 的相似度，越大越相关。"""
+    """检索结果。score 为 [0,1] 的余弦相似度，越大越相关。"""
 
     content: str
     source: str
@@ -51,33 +52,101 @@ class IndexMeta:
 
 
 class VectorStoreService:
-    """FAISS 索引的统一访问入口。"""
+    """FAISS 索引的统一访问入口。
 
-    def __init__(self, index: FAISS, meta: Optional[IndexMeta] = None) -> None:
+    索引使用内积等价距离（L2）度量，但文档向量与查询向量都做了 L2 归一化，
+    因此 ``cos = 1 - distance / 2`` 可以直接还原为真实余弦相似度，
+    使对外暴露的 score 具有明确、可解释的语义（而非单调但无意义的变换）。
+    """
+
+    def __init__(
+        self,
+        index: FAISS,
+        meta: Optional[IndexMeta] = None,
+        embedding_fn=None,
+    ) -> None:
         self._index = index
         self.meta = meta
+        # 显式注入编码器；兜底兼容 langchain-community 不同版本的属性命名
+        self._embedding = (
+            embedding_fn
+            or getattr(index, "embedding", None)
+            or getattr(index, "embeddings", None)
+        )
 
     @property
     def count(self) -> int:
         return int(self._index.index.ntotal)
 
-    def search(self, query: str, top_k: Optional[int] = None) -> List[RetrievedDoc]:
+    def _query_vector(self, query: str) -> np.ndarray:
+        """把查询编码为 L2 归一化向量，保证与索引内向量同尺度。"""
+        raw = np.asarray(self._embedding.embed_query(query), dtype="float32")
+        norm = float(np.linalg.norm(raw))
+        return raw / norm if norm > 0 else raw
+
+    def search(
+        self,
+        query: str,
+        top_k: Optional[int] = None,
+        min_score: Optional[float] = None,
+        max_per_source: Optional[int] = None,
+    ) -> List[RetrievedDoc]:
+        """检索并按需过滤。
+
+        - `min_score`：相关性阈值。**默认取配置值，而配置值默认为 0 即不过滤**，
+          检索会稳定返回 top_k 条；仅当你在自己语料上标定出可分离的阈值后才建议开启。
+        - `max_per_source`：同一来源最多保留的片段数，避免上下文被单个长文档占满。
+
+        过滤后可能返回空列表，此时调用方应给出兜底回答。
+        """
         k = top_k or settings.retriever_top_k
-        pairs = self._index.similarity_search_with_score(query, k=k)
+        threshold = (
+            settings.retriever_score_threshold if min_score is None else min_score
+        )
+        limit = (
+            settings.retriever_max_per_source if max_per_source is None else max_per_source
+        )
+        filtering = threshold > 0.0
+
+        pairs = self._index.similarity_search_with_score_by_vector(
+            self._query_vector(query), k=k
+        )
+
         results: List[RetrievedDoc] = []
+        per_source: Dict[str, int] = {}
+        dropped = 0
+
         for doc, distance in pairs:
-            score = 1.0 / (1.0 + float(distance))
-            source = (
+            score = 1.0 - float(distance) / 2.0
+            score = min(1.0, max(0.0, score))
+            if filtering and score < threshold:
+                dropped += 1
+                continue
+
+            source = str(
                 doc.metadata.get("source_file")
                 or doc.metadata.get("source")
                 or "unknown"
             )
+            if per_source.get(source, 0) >= limit:
+                continue
+            per_source[source] = per_source.get(source, 0) + 1
+
             results.append(
                 RetrievedDoc(
                     content=doc.page_content,
-                    source=str(source),
+                    source=source,
                     score=round(score, 4),
                 )
+            )
+
+        if dropped:
+            logger.info(
+                "检索「%s」：命中 %d 条，丢弃 %d 条低相关结果（阈值 %.2f）",
+                query,
+                len(results),
+                dropped,
+                threshold,
             )
         return results
 
@@ -89,12 +158,36 @@ class VectorStoreService:
         }
 
 
+def compute_corpus_fingerprint(texts: List[str]) -> str:
+    """计算语料指纹：对全部文本内容做哈希。
+
+    断点续传必须能识别「语料变了」这件事。早期版本只取前 3 条 + 总数，
+    语料中间发生替换时指纹不变，会导致旧嵌入被复用到新文本上（静默索引损坏）。
+    这里改为全量内容哈希，代价是 O(总字符数) 的纯 CPU 计算，可忽略。
+    """
+    digest = hashlib.blake2b(digest_size=16)
+    for text in texts:
+        digest.update(text.encode("utf-8"))
+        digest.update(b"\x00")
+    digest.update(str(len(texts)).encode("ascii"))
+    return digest.hexdigest()
+
+
+def _l2_normalize(matrix: np.ndarray) -> np.ndarray:
+    """按行做 L2 归一化，保证检索侧 cos = 1 - L2²/2 成立。"""
+    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    return matrix / norms
+
+
 def build_index(
     chunks: List[Document],
     index_dir: Optional[Path] = None,
     documents: int = 0,
     embedding_fn=None,
     checkpoint_batch: int = 128,
+    chunk_size: Optional[int] = None,
+    chunk_overlap: Optional[int] = None,
 ) -> VectorStoreService:
     """构建并持久化 FAISS 索引（支持断点续传）。
 
@@ -110,9 +203,7 @@ def build_index(
     total = len(texts)
     logger.info("构建 FAISS 索引：%d 个文本块", total)
 
-    fingerprint = hashlib.md5(
-        ("|".join(texts[:3]) + f"#{total}").encode("utf-8")
-    ).hexdigest()
+    fingerprint = compute_corpus_fingerprint(texts)
     progress_file = index_dir / ".build_progress.npz"
 
     embeddings: List[List[float]] = []
@@ -124,6 +215,8 @@ def build_index(
                 embeddings = data["embeddings"].tolist()
                 start = int(data["done"])
                 logger.info("检测到构建进度，从第 %d/%d 块继续", start, total)
+            else:
+                logger.info("语料已变更，忽略旧进度并重新构建索引")
         except Exception as exc:  # noqa: BLE001
             logger.warning("进度文件损坏，重新开始：%s", exc)
             embeddings = []
@@ -143,22 +236,23 @@ def build_index(
         logger.info("嵌入进度：%d/%d（%.0f%%）", done, total, done / total * 100)
 
     logger.info("全部嵌入完成，组装 FAISS 索引……")
+    matrix = _l2_normalize(np.asarray(embeddings, dtype="float32"))
     index = FAISS.from_embeddings(
-        text_embeddings=list(zip(texts, embeddings)),
+        text_embeddings=list(zip(texts, matrix.tolist())),
         embedding=embedding_fn,
         metadatas=metadatas,
     )
     index.save_local(str(index_dir))
-    if progress_file.exists():
-        progress_file.unlink()
 
     meta = IndexMeta(
         created_at=datetime.now().isoformat(timespec="seconds"),
         embedding_model=settings.embedding_model,
         dimension=int(index.index.d),
         vector_count=int(index.index.ntotal),
-        chunk_size=settings.chunk_size,
-        chunk_overlap=settings.chunk_overlap,
+        chunk_size=chunk_size if chunk_size is not None else settings.chunk_size,
+        chunk_overlap=(
+            chunk_overlap if chunk_overlap is not None else settings.chunk_overlap
+        ),
         documents=documents,
         app_version=settings.app_version,
     )
@@ -166,8 +260,15 @@ def build_index(
         json.dumps(meta.to_dict(), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+    # 索引与元数据都已落盘，进度文件只是缓存，清理失败不应中断构建
+    # （沙箱/安全删除钩子可能把 unlink 劫持为回收站操作并使其中止）。
+    with contextlib.suppress(OSError):
+        if progress_file.exists():
+            progress_file.unlink()
+
     logger.info("索引已保存：%s（%d 条向量）", index_dir, meta.vector_count)
-    return VectorStoreService(index, meta)
+    return VectorStoreService(index, meta, embedding_fn=embedding_fn)
 
 
 def load_index(
@@ -193,6 +294,6 @@ def load_index(
     index = FAISS.load_local(
         str(index_dir), embedding_fn, allow_dangerous_deserialization=True
     )
-    service = VectorStoreService(index, meta)
+    service = VectorStoreService(index, meta, embedding_fn=embedding_fn)
     logger.info("索引加载完成：%d 条向量（%s）", service.count, index_dir)
     return service

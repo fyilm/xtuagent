@@ -8,6 +8,11 @@ import pdfplumber
 
 logger = logging.getLogger(__name__)
 
+try:  # python-docx 是可选依赖：缺失时只影响 .docx 解析，其余功能不受影响
+    import docx as _docx
+except ImportError:  # pragma: no cover - 取决于安装环境
+    _docx = None
+
 
 class TextExtractor:
     def __init__(self, output_dir: str = "data/texts"):
@@ -38,6 +43,31 @@ class TextExtractor:
             logger.warning("pdf extract failed: %s — %s", path, e)
             return None
 
+    @staticmethod
+    def extract_docx(filepath: str) -> Optional[str]:
+        """解析 .docx（含表格单元格）。
+
+        培养方案、学生手册这类文档很多是 Word，且关键信息（学分、课程、
+        比例）经常放在表格里，所以表格必须一并抽出来。
+        """
+        if _docx is None:
+            logger.warning("未安装 python-docx，无法解析 .docx：%s", filepath)
+            return None
+        try:
+            document = _docx.Document(filepath)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("docx extract failed: %s — %s", filepath, e)
+            return None
+
+        parts = [p.text.strip() for p in document.paragraphs if p.text.strip()]
+        for table in document.tables:
+            for row in table.rows:
+                cells = [c.text.strip() for c in row.cells]
+                if any(cells):
+                    parts.append(" | ".join(cells))
+        text = "\n".join(parts)
+        return TextExtractor._clean_text(text) if text else None
+
     def extract_and_save(self, filepath: str) -> Optional[str]:
         path = Path(filepath)
         suffix = path.suffix.lower()
@@ -57,8 +87,11 @@ class TextExtractor:
                     text = self._clean_text(path.read_text(encoding="gbk"))
                 except Exception:
                     return None
-        elif suffix in (".doc", ".docx"):
-            logger.warning("doc/docx not supported directly, skip: %s", path)
+        elif suffix == ".docx":
+            text = self.extract_docx(str(path))
+        elif suffix == ".doc":
+            # 老版二进制 .doc 无纯 Python 解析器，需先另存为 .docx/.pdf
+            logger.warning("legacy .doc not supported, please convert to .docx/.pdf: %s", path)
             return None
         else:
             return None

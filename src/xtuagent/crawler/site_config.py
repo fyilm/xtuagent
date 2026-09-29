@@ -29,6 +29,8 @@ TARGET_SITES = [
 
 CRAWL_RULES = {
     "allowed_domains": ["xtu.edu.cn"],
+    # 优先级规则：命中这些栏目特征的链接优先入队，
+    # 避免在页数上限内被大量低价值页面（首页栏目、导航页）挤占额度。
     "priority_patterns": [
         r"/info/\d+/\d+\.htm",
         r"/tzgg/",
@@ -41,6 +43,15 @@ CRAWL_RULES = {
         r"/bksjy/",
         r"/yjsjy/",
     ],
+    # 正文页判定：仅用于日志标注（`*` 前缀），不影响抓取范围。
+    "content_patterns": [
+        r"/info/\d+/\d+\.htm",
+        r"/content/",
+        r"/article/",
+        r"\d+\.htm$",
+        r"\d+\.html$",
+    ],
+    # 排除规则：命中即不入队、不抓取。
     "exclude_patterns": [
         r"\.jpg$",
         r"\.png$",
@@ -53,5 +64,7 @@ CRAWL_RULES = {
         r"javascript:",
         r"mailto:",
     ],
-    "file_types": [".pdf", ".doc", ".docx", ".md", ".txt"],
+    # 可下载的文档类型。注意：.doc/.docx 目前无法解析为文本
+    # （TextExtractor 明确跳过），因此不再纳入，避免下载后无产出。
+    "file_types": [".pdf", ".md", ".txt"],
 }

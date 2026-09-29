@@ -35,13 +35,24 @@
       </div>
 
       <div class="panel">
+        <label class="panel-label">检索模式</label>
+        <label class="switch-row" for="agentToggle">
+          <input type="checkbox" id="agentToggle">
+          <span class="switch-text">
+            <span class="switch-title">工具增强模式</span>
+            <span class="switch-desc">模型自主调用检索/规定原文工具，适合多步查找，响应稍慢</span>
+          </span>
+        </label>
+      </div>
+
+      <div class="panel">
         <label class="panel-label">试试这些问题</label>
         <div class="examples" id="examples"></div>
       </div>
 
       <div class="sidebar-footer">
         <button class="btn-ghost" id="clearBtn">清空对话</button>
-        <p class="tech-note">GLM-4-Flash · bge-base-zh · FAISS</p>
+        <p class="tech-note" id="techNote">GLM-4-Flash · bge-base-zh · FAISS</p>
       </div>
     </aside>
 

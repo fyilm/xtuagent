@@ -11,14 +11,19 @@ build/
 .venv/
 venv/
 
-# uv
-uv.lock
+# 注意：uv.lock 必须纳入版本控制，否则无法复现依赖版本
 
 # Data
 data/raw_pdfs/
+data/raw_html/
 data/texts/
 data/index/
+data/wechat/
+data/.crawl_state.json
 docs/
+
+# 本地离线模型（体积大，不纳入版本控制）
+models/
 
 # Logs
 logs/
@@ -41,3 +46,13 @@ Thumbs.db
 # Misc
 homepage_test.txt
 ingest_log.txt
+
+# 本地备份/临时产物
+.backup_*/
+
+# Agent 本地工作区（工作日志/会话态，非项目源码，含本机网络与账号相关信息）
+.workbuddy/
+
+# 浏览器导出的登录态，切勿入库
+*.cookies.txt
+cookies.txt
