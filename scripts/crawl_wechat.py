@@ -94,6 +94,12 @@ _BLOCK_MARKERS = (
     "环境异常",
 )
 
+# 搜狗在请求过密时会**直接回状态码**（而不是返回 200 再塞验证码），
+# 这类响应必须同样按反爬处理 —— 否则主循环会把它当成「这个词没结果」，
+# 一路把剩余关键词全部烧掉（实测一次连丢 9 个关键词）。这类限流是短时的，
+# 冷却后重试通常就能恢复，所以要走重试而不是直接放弃。
+_RATE_LIMIT_CODES = {403, 429, 503}
+
 
 class AntiSpiderError(RuntimeError):
     """搜狗/微信反爬拦截。"""
@@ -321,6 +327,8 @@ class WeChatCrawler:
         kw.setdefault("timeout", self.timeout)
         kw.setdefault("allow_redirects", True)
         resp = self.session.get(url, **kw)
+        if resp.status_code in _RATE_LIMIT_CODES:
+            raise AntiSpiderError(f"HTTP {resp.status_code}（限流）")
         if resp.status_code == 200:
             _check_block(resp.text[:20000])
         return resp
@@ -350,6 +358,30 @@ class WeChatCrawler:
         items = parse_search_results(r.text, keyword)
         logger.debug("搜索 [%s] p%d → %d 条", keyword, page, len(items))
         return items
+
+    def search_with_retry(
+        self, keyword: str, page: int, retries: int, cooldown: float
+    ) -> list[Article]:
+        """搜索受限时冷却重试。
+
+        搜狗的限流是**短时**的（实测几秒到几十秒即恢复），所以不能一遇限流
+        就整体放弃——那会静默丢掉后面所有关键词。这里按 `cooldown * 2^n`
+        退避重试，全部失败才向上抛，由主循环决定是否停止。
+        """
+        last: Exception | None = None
+        for attempt in range(retries + 1):
+            try:
+                return self.search(keyword, page)
+            except (AntiSpiderError, requests.RequestException) as exc:
+                last = exc
+            if attempt < retries:
+                wait = cooldown * (2**attempt)
+                logger.warning(
+                    "  搜索受限（%s），冷却 %.0f 秒后重试 [%s] p%d（第 %d/%d 次）",
+                    last, wait, keyword, page, attempt + 1, retries,
+                )
+                time.sleep(wait)
+        raise AntiSpiderError(f"连续 {retries + 1} 次受限：{last}")
 
     # ---------- 抓正文 ----------
 
@@ -491,7 +523,9 @@ def main() -> int:
     parser.add_argument("--max-per-keyword", type=int, default=24, help="每个关键词最多抓几篇正文")
     parser.add_argument("--max-total", type=int, default=600, help="全局正文抓取上限")
     parser.add_argument("--delay", type=float, default=3.0, help="正文抓取间隔秒（含抖动）")
-    parser.add_argument("--search-delay", type=float, default=6.0, help="搜索翻页间隔秒")
+    parser.add_argument("--search-delay", type=float, default=6.0, help="搜索间隔秒（含关键词之间）")
+    parser.add_argument("--retries", type=int, default=3, help="搜索受限后的重试次数")
+    parser.add_argument("--cooldown", type=float, default=45.0, help="首次冷却秒数，按 2 倍退避")
     parser.add_argument("--timeout", type=int, default=25)
     parser.add_argument(
         "--html-dir",
@@ -549,13 +583,14 @@ def main() -> int:
             got = 0
             for page in range(1, args.pages + 1):
                 try:
-                    items = crawler.search(kw, page)
+                    items = crawler.search_with_retry(kw, page, args.retries, args.cooldown)
                 except AntiSpiderError as exc:
-                    logger.warning("搜索被拦（%s），停止。建议加大 --delay 或稍后再试。", exc)
+                    logger.warning(
+                        "搜索持续受限（%s），停止。已抓内容已保留；稍后重跑会自动跳过重复、"
+                        "只补没抓到的关键词。",
+                        exc,
+                    )
                     stopped = True
-                    break
-                except requests.RequestException as exc:
-                    logger.warning("搜索请求异常：%s", exc)
                     break
                 if not items:
                     break
@@ -577,6 +612,10 @@ def main() -> int:
                 if not args.dry_run:
                     time.sleep(args.search_delay)
             logger.info("   本词完成 %d 篇", got)
+            # 关键词之间也要留间隔：配额在首页就填满时会直接跳出翻页循环，
+            # 若此处不睡，两个关键词的搜索请求会紧挨着发出去，正是限流的诱因。
+            if not args.dry_run and not stopped:
+                time.sleep(args.search_delay)
             if stopped:
                 break
     except KeyboardInterrupt:

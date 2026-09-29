@@ -197,6 +197,119 @@ class TestAntiSpider:
         cw._check_block("<html><p>湘潭大学</p></html>")
 
 
+class _FakeResp:
+    def __init__(self, status: int, text: str = "") -> None:
+        self.status_code = status
+        self.text = text
+
+
+class _FakeSession:
+    """替身 session：固定返回一个响应，不发网络请求。"""
+
+    headers: dict = {}
+    cookies: dict = {}
+
+    def __init__(self, resp: _FakeResp) -> None:
+        self._resp = resp
+        self.calls = 0
+
+    def get(self, url, **kw):
+        self.calls += 1
+        return self._resp
+
+
+def _crawler_with(resp: _FakeResp) -> tuple[cw.WeChatCrawler, _FakeSession]:
+    c = cw.WeChatCrawler()
+    fake = _FakeSession(resp)
+    c.session = fake
+    return c, fake
+
+
+class TestRateLimitStatusCodes:
+    """搜狗限流时会直接回 403/429，而不是返回 200 再塞验证码。
+
+    早期版本只认后者，导致限流被当成「该关键词无结果」，主循环一路把
+    剩余关键词全部烧掉（实测一次静默丢掉 9 个关键词）。
+    """
+
+    @pytest.mark.parametrize("code", [403, 429, 503])
+    def test_raises_on_rate_limit_code(self, code):
+        crawler, _ = _crawler_with(_FakeResp(code))
+        with pytest.raises(cw.AntiSpiderError, match=str(code)):
+            crawler._get("https://weixin.sogou.com/weixin?query=x")
+
+    def test_200_with_captcha_marker_still_raises(self):
+        crawler, _ = _crawler_with(_FakeResp(200, "<html>请输入验证码</html>"))
+        with pytest.raises(cw.AntiSpiderError):
+            crawler._get("https://weixin.sogou.com/weixin?query=x")
+
+    def test_normal_200_passes(self):
+        crawler, fake = _crawler_with(_FakeResp(200, "<html>正常页面</html>"))
+        resp = crawler._get("https://weixin.sogou.com/weixin?query=x")
+        assert resp.status_code == 200
+        assert fake.calls == 1
+
+    def test_non_rate_limit_error_code_not_raised(self):
+        """404 之类的常规错误不该被当成反爬。"""
+        crawler, _ = _crawler_with(_FakeResp(404, "not found"))
+        assert crawler._get("https://x/").status_code == 404
+
+
+class TestSearchRetry:
+    def test_retries_then_succeeds(self, monkeypatch):
+        crawler = cw.WeChatCrawler()
+        calls = {"n": 0}
+
+        def fake_search(keyword, page=1):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise cw.AntiSpiderError("HTTP 403（限流）")
+            return [cw.Article(title="t", account="a", date="", sogou_url="u")]
+
+        monkeypatch.setattr(crawler, "search", fake_search)
+        out = crawler.search_with_retry("kw", 1, retries=3, cooldown=0)
+        assert len(out) == 1
+        assert calls["n"] == 3
+
+    def test_raises_after_exhausting_retries(self, monkeypatch):
+        crawler = cw.WeChatCrawler()
+
+        def always_blocked(keyword, page=1):
+            raise cw.AntiSpiderError("HTTP 403（限流）")
+
+        monkeypatch.setattr(crawler, "search", always_blocked)
+        with pytest.raises(cw.AntiSpiderError, match="连续"):
+            crawler.search_with_retry("kw", 1, retries=2, cooldown=0)
+
+    def test_request_exception_also_retried(self, monkeypatch):
+        import requests as _rq
+
+        crawler = cw.WeChatCrawler()
+        calls = {"n": 0}
+
+        def flaky(keyword, page=1):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise _rq.ConnectionError("boom")
+            return []
+
+        monkeypatch.setattr(crawler, "search", flaky)
+        assert crawler.search_with_retry("kw", 1, retries=2, cooldown=0) == []
+        assert calls["n"] == 2
+
+    def test_no_retry_when_first_call_ok(self, monkeypatch):
+        crawler = cw.WeChatCrawler()
+        calls = {"n": 0}
+
+        def ok(keyword, page=1):
+            calls["n"] += 1
+            return []
+
+        monkeypatch.setattr(crawler, "search", ok)
+        crawler.search_with_retry("kw", 1, retries=5, cooldown=0)
+        assert calls["n"] == 1
+
+
 class TestFmtDate:
     def test_valid_timestamp(self):
         assert cw._fmt_date("1772897135").startswith("2026-")
