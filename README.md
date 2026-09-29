@@ -247,6 +247,42 @@ uv run python scripts/ingest_urls.py ./saved_pages/*.html --source portal
 （`#js_content`）、知乎（`.RichText`）、贴吧（`.d_post_content`）等选择器，
 支持 `.pdf`、`.docx`（含表格）、`.html`、`.md`、`.txt`。
 
+### 3.3 迁移到另一台主机（离线拷贝索引）
+
+索引构建要在 CPU 上做嵌入，语料上千篇时耗时可观。如果只是想在另一台机器上
+跑起来，**不必重新构建**，把已经建好的产物拷过去即可。
+
+需要拷两样东西，缺一不可：
+
+| 内容 | 路径 | 大小（参考） | 说明 |
+|---|---|---|---|
+| 向量索引 | `data/index/` | 约 27 MB | `index.faiss` + `index.pkl` + `index_meta.json` |
+| 嵌入模型 | `models/bge-base-zh/` | 约 391 MB | 查询时要靠它把问题转成向量，**缺了服务起不来** |
+
+另外目标主机还需要 `.env`（`ZHIPU_API_KEY`）与项目代码（`git clone` 即可）。
+
+```bash
+# 在当前主机打包（排除 .build_progress.npz —— 那是断点续算的临时缓存）
+cd data/index && zip -r ../../xtuagent_index_$(date +%Y%m%d).zip . -x ".build_progress.npz"
+
+# 在目标主机解压回原位
+cd <项目根>/data && unzip xtuagent_index_YYYYMMDD.zip -d index/
+```
+
+然后在目标主机上启动验证：
+
+```bash
+uv run python scripts/serve.py
+curl -s http://127.0.0.1:8000/api/stats      # 向量数/文档数应与源主机一致
+```
+
+> ⚠️ 注意 `index_meta.json` 里的 `embedding_model` 记录的是**构建时的绝对路径**。
+> 目标主机若把模型放在别处，要同步改 `.env` 里的 `EMBEDDING_MODEL`（默认
+> `BAAI/bge-base-zh`，本项目在本机改成了本地目录）。**索引与模型必须配对**——
+> 不同模型编码出的向量与查询向量不在同一空间，检索结果会失真。另外
+> `config.py` 强制离线加载（`TRANSFORMERS_OFFLINE=1` / `local_files_only=True`），
+> 所以模型**必须已经落盘**，不能指望运行时自动下载。
+
 ---
 
 ## 4. 前端使用
