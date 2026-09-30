@@ -496,11 +496,50 @@ body::after {
 .source-item .source-file {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  gap: 8px;
   font-size: 12px;
   color: var(--accent-cyan);
   margin-bottom: 5px;
+}
+
+/* 「知识库 / 网络」标签：网络来源必须一眼可辨，避免与校内官方口径混淆 */
+.source-badge {
+  flex-shrink: 0;
+  padding: 1px 7px;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--accent-cyan);
+  border: 1px solid rgba(34, 211, 238, 0.3);
+  border-radius: 4px;
+}
+
+.source-web .source-badge {
+  color: var(--warning);
+  border-color: rgba(251, 191, 36, 0.35);
+  background: rgba(251, 191, 36, 0.08);
+}
+
+.source-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: inherit;
+  text-decoration: none;
+}
+
+a.source-name:hover { text-decoration: underline; }
+
+.source-web .source-name { color: var(--warning); }
+
+.source-title {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .source-score {
@@ -510,6 +549,25 @@ body::after {
   color: var(--text-dim);
   background: rgba(34, 211, 238, 0.07);
   border-radius: 999px;
+}
+
+/* 联网兜底的过渡提示（"校内知识库未收录，已联网检索到 N 条资料"） */
+.msg-status {
+  margin-top: 6px;
+  font-size: 11.5px;
+  color: var(--warning);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.msg-status::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warning);
+  animation: pulse 1.2s ease-in-out infinite;
 }
 
 .source-snippet {

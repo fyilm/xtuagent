@@ -7,6 +7,14 @@ const API = {
   agent: "/api/agent",
 };
 
+// 前端构建号：由后端按静态资源内容自动算出并注入到 <meta name="x-build">。
+// 用途：一眼确认浏览器加载的到底是不是最新 JS。
+// 同一个号也用于资源 URL（index.html 里 ?v={{BUILD}}）——文件一变 URL 就变，
+// 浏览器必然重新拉取，所以正常情况下不需要用户手动清缓存。
+const APP_BUILD =
+  (document.querySelector('meta[name="x-build"]') || {}).content || "dev";
+window.__XtuAgentBuild = APP_BUILD;
+
 const state = {
   ready: false,
   streaming: false,
@@ -88,8 +96,10 @@ async function init() {
     const model = (data.meta && data.meta.embedding_model) || data.embedding_model || "bge-base-zh";
     const short = model.split("/").pop();
     els.techNote.textContent =
-      `${short} · 阈值 ${data.score_threshold ?? "-"} · ${data.model || "GLM"}`;
-  } catch { /* 忽略 */ }
+      `${short} · 阈值 ${data.score_threshold ?? "-"} · ${data.model || "GLM"} · 构建 ${APP_BUILD}`;
+  } catch {
+    els.techNote.textContent = `构建 ${APP_BUILD}`;
+  }
 }
 
 /* ============ 示例问题 ============ */
@@ -124,7 +134,7 @@ function renderMarkdown(source) {
     return `\u0000${codeBlocks.length - 1}\u0000`;
   });
 
-  text = escapeHtml(text);
+  text = escapeHtml(text).replace(/\r\n?/g, "\n");
   text = text
     .replace(/^### (.+)$/gm, "<h3>$1</h3>")
     .replace(/^## (.+)$/gm, "<h2>$1</h2>")
@@ -132,27 +142,123 @@ function renderMarkdown(source) {
     .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
     .replace(/`([^`\n]+)`/g, "<code>$1</code>");
 
-  text = text.replace(/(?:^|\n)((?:[-*] .+(?:\n|$))+)/g, (_, list) => {
-    const items = list.trim().split("\n")
-      .map((line) => `<li>${line.replace(/^[-*] /, "")}</li>`).join("");
-    return `\n<ul>${items}</ul>`;
-  });
-  text = text.replace(/(?:^|\n)((?:\d+\. .+(?:\n|$))+)/g, (_, list) => {
-    const items = list.trim().split("\n")
-      .map((line) => `<li>${line.replace(/^\d+\. /, "")}</li>`).join("");
-    return `\n<ol>${items}</ol>`;
-  });
+  return restoreCode(buildBlocks(text), codeBlocks);
+}
 
-  const restore = (chunk) => chunk.replace(/\u0000(\d+)\u0000/g, (_, i) => codeBlocks[i]);
-  return text
-    .split(/\n{2,}/)
-    .map((part) => {
-      const trimmed = part.trim();
-      if (!trimmed) return "";
-      if (/^<(h\d|ul|ol|pre)/.test(trimmed)) return restore(trimmed);
-      return `<p>${restore(trimmed).replace(/\n/g, "<br>")}</p>`;
+/*
+ * 识别列表行：允许前导缩进；标记支持 - * 以及 1. 1、
+ * 需区分「真列表」和正文，故：
+ *   - `-`/`*` 后必须有空白（`-abc` 不是列表）
+ *   - `1.` 后必须有空白（否则 `3.14是圆周率` 会被误判）
+ *   - `1、` 后允许无空白（中文顿号习惯不空格，且顿号不可能是小数点）
+ */
+function parseListLine(line) {
+  const m = line.match(/^([ \t]*)([-*]|\d+[.、])([ \t]*)(.*)$/);
+  if (!m) return null;
+  const [, ws, marker, sep, content] = m;
+  if (!content) return null;
+  const isBullet = /^[-*]$/.test(marker);
+  if (isBullet && !sep) return null;
+  if (/^\d+\.$/.test(marker) && !sep) return null;
+  return {
+    indent: ws.replace(/\t/g, "  ").length,
+    type: isBullet ? "ul" : "ol",
+    content,
+  };
+}
+
+/*
+ * 按行构建块级结构。
+ * 关键点：编号项之间常夹空行，但不能因此把列表切断——
+ * 否则每一项都会变成独立的 <ol>，浏览器从 1 重新编号（表现为「全是 1.」）。
+ * 这里空行不打断列表，只有「非列表且非空」的行才终结列表。
+ */
+function buildBlocks(text) {
+  const root = { children: [] };
+  const listStack = [];
+  let para = [];
+  let container = root.children;
+
+  const flushPara = () => {
+    if (!para.length) return;
+    container.push({ type: "raw", html: `<p>${para.join("<br>")}</p>` });
+    para = [];
+  };
+
+  for (const line of text.split("\n")) {
+    if (line.trim() === "") {
+      if (listStack.length === 0) flushPara();
+      continue;
+    }
+
+    const parsed = parseListLine(line);
+    if (!parsed) {
+      if (/^<h\d>/.test(line) || /^\u0000\d+\u0000$/.test(line.trim())) {
+        flushPara();
+        listStack.length = 0;
+        container = root.children;
+        container.push({ type: "raw", html: line.trim() });
+        continue;
+      }
+      if (listStack.length) listStack.length = 0;
+      container = root.children;
+      para.push(line);
+      continue;
+    }
+
+    flushPara();
+    const { indent, type, content } = parsed;
+
+    while (listStack.length && listStack[listStack.length - 1].indent > indent) {
+      listStack.pop();
+    }
+
+    const top = listStack[listStack.length - 1];
+    if (top && top.indent === indent && top.type === type) {
+      const item = { text: content, children: [] };
+      top.node.items.push(item);
+      top.lastItem = item;
+      container = item.children;
+      continue;
+    }
+
+    let parentContainer;
+    if (top && top.indent === indent) {
+      parentContainer = listStack.pop().parentContainer;
+    } else if (top) {
+      parentContainer = top.lastItem ? top.lastItem.children : root.children;
+    } else {
+      parentContainer = root.children;
+    }
+
+    const node = { type, items: [] };
+    parentContainer.push({ type: "list", node });
+    const ctx = { indent, type, node, lastItem: null, parentContainer };
+    listStack.push(ctx);
+    const item = { text: content, children: [] };
+    node.items.push(item);
+    ctx.lastItem = item;
+    container = item.children;
+  }
+
+  flushPara();
+  return serialize(root.children);
+}
+
+function serialize(nodes) {
+  return nodes
+    .map((n) => {
+      if (n.type === "raw") return n.html;
+      const items = n.node.items
+        .map((it) => `<li>${it.text}${serialize(it.children)}</li>`)
+        .join("");
+      return `<${n.node.type}>${items}</${n.node.type}>`;
     })
     .join("");
+}
+
+function restoreCode(html, codeBlocks) {
+  return html.replace(/\u0000(\d+)\u0000/g, (_, i) => codeBlocks[i]);
 }
 
 /* ============ 消息渲染 ============ */
@@ -191,26 +297,73 @@ function scrollToBottom() {
   els.messages.scrollTop = els.messages.scrollHeight;
 }
 
+/* 来源卡片：知识库片段与网络检索结果统一展示，用「知识库 / 网络」标签区分。
+ *
+ * 网络来源的标题、站点名、URL 全部来自外部网页，一律用 textContent 赋值，
+ * 绝不拼 HTML 字符串——否则一个恶意网页标题就能注入脚本。 */
 function renderSources(body, sources) {
   if (!sources || sources.length === 0) return;
+  const kbCount = sources.filter((s) => s.kind !== "web").length;
+  const webCount = sources.length - kbCount;
+  const summary = [];
+  if (kbCount) summary.push(`知识库 ${kbCount} 条`);
+  if (webCount) summary.push(`网络 ${webCount} 条`);
+
   const card = document.createElement("div");
   card.className = "sources";
   const header = document.createElement("div");
   header.className = "sources-header";
-  header.innerHTML = `<span class="arrow">▶</span><span>参考来源 · ${sources.length} 条</span>`;
+  header.innerHTML = `<span class="arrow">▶</span><span></span>`;
+  header.lastElementChild.textContent = `参考来源 · ${summary.join(" / ")}`;
   header.addEventListener("click", () => card.classList.toggle("open"));
 
   const list = document.createElement("div");
   list.className = "sources-list";
+
   sources.forEach((s) => {
+    const isWeb = s.kind === "web";
     const item = document.createElement("div");
-    item.className = "source-item";
-    item.innerHTML = `
-      <div class="source-file">
-        <span>${escapeHtml(s.file)}</span>
-        <span class="source-score">相似度 ${(s.score * 100).toFixed(0)}%</span>
-      </div>
-      <div class="source-snippet">${escapeHtml(s.snippet)}</div>`;
+    item.className = isWeb ? "source-item source-web" : "source-item";
+
+    const head = document.createElement("div");
+    head.className = "source-file";
+
+    const badge = document.createElement("span");
+    badge.className = "source-badge";
+    badge.textContent = isWeb ? "网络" : "知识库";
+
+    const name = document.createElement(isWeb && s.url ? "a" : "span");
+    name.className = "source-name";
+    name.textContent = s.file || (isWeb ? "网络来源" : "未知来源");
+    if (isWeb && s.url) {
+      name.href = s.url;
+      name.target = "_blank";
+      name.rel = "noopener noreferrer";
+      name.title = s.url;
+    }
+
+    const score = document.createElement("span");
+    score.className = "source-score";
+    score.textContent = isWeb
+      ? s.publish_date || "网页"
+      : `相似度 ${((s.score || 0) * 100).toFixed(0)}%`;
+
+    head.append(badge, name, score);
+    item.appendChild(head);
+
+    if (isWeb && s.title) {
+      const title = document.createElement("div");
+      title.className = "source-title";
+      title.textContent = s.title;
+      title.title = s.title;
+      item.appendChild(title);
+    }
+
+    const snippet = document.createElement("div");
+    snippet.className = "source-snippet";
+    snippet.textContent = s.snippet || "";
+    item.appendChild(snippet);
+
     list.appendChild(item);
   });
 
@@ -269,6 +422,8 @@ async function send() {
     }
   } finally {
     if (typing.parentNode) typing.remove();
+    // 兜底清理：流中途异常时，过渡提示可能没被收掉，别让它永远挂在那儿
+    body.querySelectorAll(".msg-status").forEach((n) => n.remove());
     state.streaming = false;
     els.sendBtn.disabled = false;
     els.input.focus();
@@ -281,6 +436,21 @@ async function runStreamMode(ctx) {
   const { question, body, contentEl, typing } = ctx;
   let answerText = "";
   let sources = [];
+  let webSources = [];
+  let statusEl = null;
+
+  const clearStatus = () => {
+    if (statusEl && statusEl.parentNode) statusEl.remove();
+    statusEl = null;
+  };
+  const setStatus = (text) => {
+    clearStatus();
+    statusEl = document.createElement("div");
+    statusEl.className = "msg-status";
+    statusEl.textContent = text;
+    body.appendChild(statusEl);
+    scrollToBottom();
+  };
 
   const resp = await fetch(API.askStream, {
     method: "POST",
@@ -324,26 +494,61 @@ async function runStreamMode(ctx) {
         set answerText(v) { answerText = v; },
         get sources() { return sources; },
         set sources(v) { sources = v; },
+        get webSources() { return webSources; },
+        set webSources(v) { webSources = v; },
+        setStatus,
+        clearStatus,
       });
     }
   }
 }
 
+function describeDone(event, kbCount, webCount) {
+  const bits = [`耗时 ${((event.elapsed_ms || 0) / 1000).toFixed(1)}s`];
+  if (event.mode === "web") {
+    bits.push(`知识库未收录 · 已联网检索 ${webCount} 条`);
+  } else if (event.mode === "refused") {
+    bits.push("知识库与网络均未找到依据");
+  } else {
+    bits.push(`检索 ${kbCount} 条来源`);
+  }
+  return bits.join(" · ");
+}
+
 function handleStreamEvent(event, ctx) {
   if (event.type === "sources") {
     ctx.sources = event.sources || [];
+  } else if (event.type === "web_sources") {
+    ctx.webSources = event.sources || [];
+  } else if (event.type === "reset") {
+    // 模型先吐了拒答话术，随后才判定该转联网 —— 把已渲染内容整个抹掉重来。
+    // 抹掉是必须的：留着「暂未找到相关信息」再补一段网络答案，用户会以为自相矛盾。
+    ctx.answerText = "";
+    ctx.sources = [];
+    ctx.webSources = [];
+    if (ctx.typing.parentNode) ctx.typing.remove();
+    ctx.contentEl.innerHTML = "";
+    ctx.body.querySelectorAll(".sources, .msg-meta").forEach((n) => n.remove());
+    ctx.setStatus("校内知识库未收录，正在联网检索…");
+    scrollToBottom();
+  } else if (event.type === "status") {
+    ctx.setStatus(event.text);
   } else if (event.type === "delta") {
+    ctx.clearStatus();
     if (ctx.typing.parentNode) ctx.typing.remove();
     ctx.answerText += event.text;
     ctx.contentEl.innerHTML = renderMarkdown(ctx.answerText) + '<span class="cursor"></span>';
     scrollToBottom();
   } else if (event.type === "done") {
+    ctx.clearStatus();
     if (ctx.typing.parentNode) ctx.typing.remove();
     ctx.contentEl.innerHTML = renderMarkdown(ctx.answerText);
-    if (ctx.sources.length) renderSources(ctx.body, ctx.sources);
-    appendMeta(ctx.body, `耗时 ${(event.elapsed_ms / 1000).toFixed(1)}s · 检索 ${ctx.sources.length} 条来源`);
+    const all = ctx.sources.concat(ctx.webSources);
+    if (all.length) renderSources(ctx.body, all);
+    appendMeta(ctx.body, describeDone(event, ctx.sources.length, ctx.webSources.length));
     scrollToBottom();
   } else if (event.type === "error") {
+    ctx.clearStatus();
     if (ctx.typing.parentNode) ctx.typing.remove();
     ctx.contentEl.innerHTML = `<p style="color:#f87171">生成失败：${escapeHtml(event.message)}</p>`;
   }
@@ -380,10 +585,13 @@ async function runAgentMode(ctx) {
 
   contentEl.innerHTML = renderMarkdown(data.answer || "（无回答）");
   if (data.sources && data.sources.length) renderSources(body, data.sources);
-  appendMeta(
-    body,
-    `耗时 ${((data.elapsed_ms || 0) / 1000).toFixed(1)}s · 工具检索命中 ${(data.sources || []).length} 条来源`
-  );
+  const kbCount = (data.sources || []).filter((s) => s.kind !== "web").length;
+  const webCount = (data.sources || []).length - kbCount;
+  const parts = [`耗时 ${((data.elapsed_ms || 0) / 1000).toFixed(1)}s`];
+  if (kbCount) parts.push(`知识库 ${kbCount} 条`);
+  if (webCount) parts.push(`联网 ${webCount} 条`);
+  if (!kbCount && !webCount) parts.push("未命中任何来源");
+  appendMeta(body, `工具增强模式 · ${parts.join(" · ")}`);
   scrollToBottom();
 }
 

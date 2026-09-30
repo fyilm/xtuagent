@@ -37,6 +37,21 @@ class Settings(BaseSettings):
 
     # LLM（仅智谱）
     zhipu_api_key: str = ""
+    # 默认值选型说明（2026-09 实测，同一出口网络、同一提问口径压测）：
+    #   glm-4-flash〔默认·免费〕    4/4 成功，极简问题 0.4~0.8s，RAG 端到端 29.8s
+    #   glm-4.5-flash〔免费〕       4/4 成功，但抖动大（3.3~40.5s）
+    #   glm-4.7-flash〔免费〕       不可用：429 限流挤爆，3 次重试全失败
+    #   glm-4.7-flashx〔付费〕      4/7 成功，失败时精确卡死 60.1s，不可用于生产
+    #   glm-5.3-flashx〔付费〕      4/4 成功，极简 2.5~4.4s，RAG 端到端 17.2s（更快）
+    # 结论：免费档里 glm-4-flash 最稳最快；若可接受付费，glm-5.3-flashx 是全面更优解。
+    #
+    # 两个必须知道的坑：
+    #   1) `GET /api/paas/v4/models` 只枚举主型号，不含 `-flash`/`-flashx` 子型号，
+    #      但子型号可直接调用（按账号权限放开）。判断存在性看错误码：
+    #      429=存在但限流、403=无权访问、404=不存在。故本默认值未出现在该列表属正常。
+    #   2) ChatZhipuAI 的 HTTP 超时硬编码为 60s（langchain_community/chat_models/zhipuai.py
+    #      四处 httpx.Client(timeout=60)），且无可配置字段。超过 60s 的生成必被 ReadTimeout
+    #      砍断，只能靠 pipeline._invoke_with_retry 兜底。
     zhipu_model: str = "glm-4-flash"
     llm_temperature: float = 0.3
     llm_max_retries: int = 3
@@ -77,6 +92,34 @@ class Settings(BaseSettings):
     retriever_score_threshold: float = 0.0
     # 同一来源文件最多保留的片段数，避免上下文被单个长文档占满
     retriever_max_per_source: int = 3
+    # 送入模型前，丢弃正文过短的片段（抽取残渣 + 导航碎片）。
+    # 定 60 是扫出来的拐点：实测某站点 45 字左右的导航块（"湘潭大学/校内链接/
+    # 校外链接/图书馆/招生网…"）会因为 BGE 相似度被压缩而拿到 0.8703，
+    # 压过真正的教授简介（0.8667）排到第一 —— 按长度才滤得掉。
+    # 不能再往上调：转专业那条 0.8695 的相关附件块约 90 字，阈值设 100 会误删。
+    retriever_min_chunk_chars: int = 60
+    # 送入模型前对片段做近似去重，避免同一段样板文字占满 top_k 名额（0 关闭）
+    retriever_dedup_threshold: float = 0.9
+    # 建库时的近似去重阈值（char 5-gram Jaccard）。取 0.95 有实测依据：
+    # 无关的两篇通知仅因共用页面模板就能到 0.90~0.95，真正重复的在 0.95 以上。
+    # 设为 0 则只保留「逐字节相同」的精确去重。
+    docs_near_dup_threshold: float = 0.95
+
+    # ---- 联网兜底 ----
+    # 知识库答不出来时，是否自动去网上检索答案。
+    #
+    # 为什么要这层：本地语料只有校内站点的 4400+ 篇文本，对「校园网 VPN 怎么用」
+    # 这类问题常常只有《校园网简介》而无操作步骤；纯域外问题更是完全没有依据。
+    # 直接回一句「暂未找到相关信息」等于把用户堵回去——用户要的是答案，不是免责声明。
+    #
+    # 触发时机：模型读完知识库片段后判定「答不了」的那一刻，才发起联网检索。
+    # 正常能答的问题**不产生任何搜索费用**，也不增加延迟。
+    # 兜底本身再失败时，仍然退回原来的拒答话术——不会因为多了这一层而变脆。
+    web_fallback_enabled: bool = True
+    # 搜索档位：search_std（约 0.01 元/次）｜search_pro（更贵、结果更全）
+    web_search_engine: str = "search_std"
+    web_search_count: int = 5
+    web_search_timeout: int = 20
 
     # 服务
     host: str = "127.0.0.1"
@@ -88,7 +131,10 @@ class Settings(BaseSettings):
     crawl_max_depth: int = 3
     crawl_delay: float = 0.3
     crawl_timeout: int = 20
-    crawl_max_pages_per_site: int = 60
+    # 单站页数上限。注意此前 crawl.py 并未把本项传给 Spider（吃的是 Spider 的
+    # 默认值 80），所以这个开关形同虚设——现已接线；14 个学院新域名页面较多，
+    # 给到 120 让栏目页能展开，总预算仍由 crawl_max_total_pages 兜住。
+    crawl_max_pages_per_site: int = 120
     # 单次运行的全局页数预算。整站爬取耗时很长，设上限可保证「每次运行都有边界」，
     # 未爬完的部分会随断点状态保存，下次运行继续。
     crawl_max_total_pages: int = 3000

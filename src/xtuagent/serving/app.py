@@ -1,5 +1,6 @@
 """FastAPI 应用：REST + SSE 流式问答 + 静态前端。"""
 
+import hashlib
 import json
 import logging
 import time
@@ -7,12 +8,13 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from ..core.config import settings
 from ..core.exceptions import XtuAgentError
 from ..core.logging import setup_logging
+from ..rag.pipeline import RAGPipeline
 from .container import STATE_ERROR, STATE_READY, container
 from .schemas import AskRequest, AskResponse, HealthResponse, Source
 
@@ -76,6 +78,7 @@ def stats() -> dict:
         "embedding_model": settings.embedding_model,
         "top_k": settings.retriever_top_k,
         "score_threshold": settings.retriever_score_threshold,
+        "web_fallback": settings.web_fallback_enabled,
     }
     if container.vector_store is None:
         return payload
@@ -90,13 +93,14 @@ def ask(req: AskRequest) -> AskResponse:
     answer = container.pipeline.ask(
         req.question.strip(), req.language, top_k=req.top_k
     )
+    sources = RAGPipeline._kb_source_payload(answer.sources) + (
+        RAGPipeline._web_source_payload(answer.web_sources)
+    )
     return AskResponse(
         answer=answer.text,
-        sources=[
-            Source(file=s.source, snippet=s.content[:160], score=s.score)
-            for s in answer.sources
-        ],
+        sources=[Source(**s) for s in sources],
         elapsed_ms=answer.elapsed_ms,
+        mode=answer.mode,
     )
 
 
@@ -134,15 +138,63 @@ def agent_ask(req: AskRequest) -> dict:
 
     start = time.time()
     result = get_assistant().run(req.question.strip())
+    sources = RAGPipeline._kb_source_payload(result.sources) + (
+        RAGPipeline._web_source_payload(result.web_sources)
+    )
     return {
         "answer": result.text,
-        "sources": [
-            {"file": s.source, "snippet": s.content[:160], "score": s.score}
-            for s in result.sources
-        ],
+        "sources": sources,
         "elapsed_ms": int((time.time() - start) * 1000),
+        "mode": "web" if result.web_sources else "kb",
     }
 
 
+class NoCacheStaticFiles(StaticFiles):
+    """静态前端不做强缓存。
+
+    背景：StaticFiles 默认只回 etag / last-modified，浏览器会走启发式缓存。
+    曾出现「改了 web/js/app.js，代码确实是新的，但页面仍执行旧版」——
+    表现为改完前端毫无效果，且**需要用户自己去清缓存**，这是不可接受的设计。
+    这里统一加 no-cache, must-revalidate：每次都会向服务端校验，
+    未变更时走 304，开销可忽略；变更后普通刷新即生效。
+    """
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return response
+
+
+def static_build_id() -> str:
+    """按前端资源内容算出的构建号（前 10 位）。
+
+    作用：把 index.html 里的 `?v={{BUILD}}` 换成它。
+    文件内容一变，构建号就变，资源 URL 随之改变——浏览器眼里这是「新文件」，
+    必然重新拉取。**不需要人工维护版本号，重启即上新。**
+    """
+    digest = hashlib.sha1()
+    for pattern in ("js/*.js", "css/*.css"):
+        for path in sorted(settings.web_dir.glob(pattern)):
+            digest.update(path.name.encode("utf-8"))
+            digest.update(path.read_bytes())
+    return digest.hexdigest()[:10]
+
+
+@app.get("/", include_in_schema=False)
+def index_page() -> HTMLResponse:
+    """首页：注入构建号，避免用户被浏览器缓存困住。"""
+    html = (settings.web_dir / "index.html").read_text(encoding="utf-8")
+    return HTMLResponse(
+        html.replace("{{BUILD}}", static_build_id()),
+        headers={"Cache-Control": "no-cache, must-revalidate"},
+    )
+
+
+@app.get("/api/build", include_in_schema=False)
+def build_info() -> dict:
+    """当前前端构建号，便于排查「页面跑的是哪一版」。"""
+    return {"build": static_build_id()}
+
+
 if settings.web_dir.exists():
-    app.mount("/", StaticFiles(directory=str(settings.web_dir), html=True), name="web")
+    app.mount("/", NoCacheStaticFiles(directory=str(settings.web_dir), html=True), name="web")

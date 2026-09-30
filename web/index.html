@@ -5,7 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>XtuAgent · 校园智能学业问答系统</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='80' font-size='80'>🎓</text></svg>">
-  <link rel="stylesheet" href="/css/style.css">
+  <!-- 资源地址里的 {{BUILD}} 由后端注入（serving/app.py 的 static_build_id）。
+       前端文件一变，构建号就变，URL 随之改变，浏览器必然重新拉取——
+       无需人工维护版本号，也无需用户手动清缓存。 -->
+  <link rel="stylesheet" href="/css/style.css?v={{BUILD}}">
+  <meta name="x-build" content="{{BUILD}}">
 </head>
 <body>
   <div class="app">
@@ -82,12 +86,12 @@
             </svg>
           </button>
         </div>
-        <p class="composer-hint">回答由 AI 基于知识库生成，重要信息请以学校官方文件为准</p>
+        <p class="composer-hint">回答由 AI 生成，优先依据校内知识库；涉及网络检索的内容会明确标注，重要信息请以学校官方文件为准</p>
       </div>
     </main>
   </div>
 
   <div class="toast" id="toast"></div>
-  <script src="/js/app.js"></script>
+  <script src="/js/app.js?v={{BUILD}}"></script>
 </body>
 </html>

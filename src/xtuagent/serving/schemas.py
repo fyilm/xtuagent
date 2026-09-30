@@ -6,9 +6,20 @@ from pydantic import BaseModel, Field
 
 
 class Source(BaseModel):
+    """一条参考来源。知识库来源与网络来源共用本模型，靠 `kind` 区分。
+
+    - `kind="kb"`：本地知识库片段，`file` 是校内文件名，`score` 是余弦相似度。
+    - `kind="web"`：联网检索结果，`file` 是站点名，`url` 可点击跳转，
+      `score` 无意义（恒为 0，前端不展示）。
+    """
+
     file: str
     snippet: str
-    score: float
+    score: float = 0.0
+    kind: str = "kb"
+    url: str = ""
+    title: str = ""
+    publish_date: str = ""
 
 
 class AskRequest(BaseModel):
@@ -21,6 +32,7 @@ class AskResponse(BaseModel):
     answer: str
     sources: List[Source] = []
     elapsed_ms: int = 0
+    mode: str = "kb"
 
 
 class HealthResponse(BaseModel):

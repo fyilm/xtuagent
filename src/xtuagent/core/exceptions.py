@@ -19,3 +19,7 @@ class IndexMetaMismatchError(XtuAgentError):
 
 class LLMInvocationError(XtuAgentError):
     """大模型调用失败（重试后仍失败）。"""
+
+
+class WebSearchError(XtuAgentError):
+    """联网检索失败（鉴权、限流、超时、响应格式异常等）。"""
