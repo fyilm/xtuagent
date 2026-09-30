@@ -72,7 +72,15 @@ def test_search_returns_scored_docs(tmp_path):
     loaded = load_index(tmp_path, embedding_fn=FakeEmbeddings())
 
     # min_score=0 关闭阈值过滤，单独验证打分与排序行为
-    results = loaded.search("第1条规定内容 学分管理", top_k=3, min_score=0.0)
+    # min_chunk_chars=0 / dedup_threshold=0：同时关掉碎片过滤与近似去重，
+    # 这个用例只考察打分与排序，量化指标另有两个专门用例。
+    results = loaded.search(
+        "第1条规定内容 学分管理",
+        top_k=3,
+        min_score=0.0,
+        min_chunk_chars=0,
+        dedup_threshold=0.0,
+    )
 
     assert len(results) == 3
     assert all(isinstance(r, RetrievedDoc) for r in results)
@@ -87,8 +95,65 @@ def test_score_uses_cosine_semantics(tmp_path):
     build_index(chunks, index_dir=tmp_path, documents=1, embedding_fn=FakeEmbeddings())
     loaded = load_index(tmp_path, embedding_fn=FakeEmbeddings())
 
-    results = loaded.search("学分制管理规定", top_k=1, min_score=0.0)
+    results = loaded.search(
+        "学分制管理规定", top_k=1, min_score=0.0, min_chunk_chars=0, dedup_threshold=0.0
+    )
     assert results[0].score == pytest.approx(1.0, abs=1e-4)
+
+
+def test_search_drops_tiny_chunks(tmp_path):
+    """抽取残渣（「。」这类碎块）不得占用 top_k 名额。
+
+    语料里真实存在 len<10 的块（`。`、`..`、`.7亿元`），它们没有信息量，
+    却会和正经内容一起被送进模型。
+    """
+    chunks = [
+        Document(page_content="。", metadata={"source_file": "junk.txt"}),
+        Document(
+            page_content="湘潭大学学分管理规定" * 5, metadata={"source_file": "real.txt"}
+        ),
+    ]
+    build_index(chunks, index_dir=tmp_path, documents=2, embedding_fn=FakeEmbeddings())
+    loaded = load_index(tmp_path, embedding_fn=FakeEmbeddings())
+
+    both = loaded.search(
+        "学分管理规定", top_k=2, min_score=0.0, min_chunk_chars=0, dedup_threshold=0.0
+    )
+    assert len(both) == 2
+
+    kept = loaded.search(
+        "学分管理规定", top_k=2, min_score=0.0, min_chunk_chars=40, dedup_threshold=0.0
+    )
+    assert [r.source for r in kept] == ["real.txt"]
+
+
+def test_search_suppresses_near_duplicate_chunks(tmp_path):
+    """跨文件同文不得把 top_k 占满。
+
+    同一段样板文字会出现在几十个页面上，而 `max_per_source` 是按**来源文件**
+    去重的，挡不住这种「不同文件、同一段文字」的情况。
+    """
+    # 注意填充文本必须是**非重复**的：若用「第一章总则」×20 这种周期串，
+    # 5-gram 集合会退化到十几个元素，Jaccard 反而失真（≈0.85），
+    # 那是测试用例的问题，不是去重逻辑的问题。
+    filler = "".join(chr(0x4E00 + i) for i in range(220))
+    base = "湘潭大学学分管理规定" + filler
+    chunks = [
+        Document(page_content=f"{base}{suffix}", metadata={"source_file": f"page_{i}.txt"})
+        for i, suffix in enumerate("甲乙丙丁")
+    ]
+    build_index(chunks, index_dir=tmp_path, documents=4, embedding_fn=FakeEmbeddings())
+    loaded = load_index(tmp_path, embedding_fn=FakeEmbeddings())
+
+    raw = loaded.search(
+        "学分管理规定", top_k=4, min_score=0.0, min_chunk_chars=0, dedup_threshold=0.0
+    )
+    assert sum(1 for r in raw if r.source.startswith("page_")) == 4
+
+    deduped = loaded.search(
+        "学分管理规定", top_k=4, min_score=0.0, min_chunk_chars=0, dedup_threshold=0.9
+    )
+    assert sum(1 for r in deduped if r.source.startswith("page_")) == 1
 
 
 def test_threshold_filters_irrelevant_results(tmp_path):
@@ -108,7 +173,14 @@ def test_max_per_source_limits_single_document(tmp_path):
     build_index(chunks, index_dir=tmp_path, documents=1, embedding_fn=FakeEmbeddings())
     loaded = load_index(tmp_path, embedding_fn=FakeEmbeddings())
 
-    results = loaded.search("学分管理规定", top_k=5, min_score=0.0, max_per_source=2)
+    results = loaded.search(
+        "学分管理规定",
+        top_k=5,
+        min_score=0.0,
+        max_per_source=2,
+        min_chunk_chars=0,
+        dedup_threshold=0.0,
+    )
     assert len(results) == 2
 
 

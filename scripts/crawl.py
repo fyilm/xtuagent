@@ -35,6 +35,12 @@ def main() -> None:
     parser.add_argument("--timeout", type=int, default=settings.crawl_timeout)
     parser.add_argument("--workers", type=int, default=5)
     parser.add_argument(
+        "--max-pages-per-site",
+        type=int,
+        default=settings.crawl_max_pages_per_site,
+        help="单个站点最多抓取的页数（默认取配置里的 crawl_max_pages_per_site）",
+    )
+    parser.add_argument(
         "--max-total-pages",
         type=int,
         default=settings.crawl_max_total_pages,
@@ -75,6 +81,7 @@ def main() -> None:
         delay=args.delay,
         timeout=args.timeout,
         max_total_pages=args.max_total_pages,
+        max_pages_per_site=args.max_pages_per_site,
         state_file=str(state_file),
         resume=not args.fresh,
         html_cache_dir=str(_ROOT / HTML_CACHE_DIR),

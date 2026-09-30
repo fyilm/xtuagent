@@ -4,6 +4,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import zlib
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -21,6 +22,14 @@ logger = logging.getLogger(__name__)
 
 INDEX_FILE = "index.faiss"
 META_FILE = "index_meta.json"
+
+
+def _jaccard(a: set, b: set) -> float:
+    """两个集合的 Jaccard 相似度。"""
+    if not a or not b:
+        return 0.0
+    inter = len(a & b)
+    return inter / (len(a) + len(b) - inter)
 
 
 @dataclass
@@ -90,12 +99,19 @@ class VectorStoreService:
         top_k: Optional[int] = None,
         min_score: Optional[float] = None,
         max_per_source: Optional[int] = None,
+        min_chunk_chars: Optional[int] = None,
+        dedup_threshold: Optional[float] = None,
     ) -> List[RetrievedDoc]:
         """检索并按需过滤。
 
         - `min_score`：相关性阈值。**默认取配置值，而配置值默认为 0 即不过滤**，
           检索会稳定返回 top_k 条；仅当你在自己语料上标定出可分离的阈值后才建议开启。
         - `max_per_source`：同一来源最多保留的片段数，避免上下文被单个长文档占满。
+        - `min_chunk_chars`：丢弃正文过短的片段（默认取配置值，0 关闭）。语料里存在
+          「。」「..」「.7亿元」这类抽取残渣，它们没有信息量却会占掉一个 top_k 名额。
+        - `dedup_threshold`：对返回的片段做近似去重，默认取配置值（0 关闭）。
+          校园站点同一段顶栏/页脚会出现在几十个页面上，不去重会出现「top_k 全被
+          同一段样板文字占满」；注意按来源去重的 `max_per_source` 挡不住这种跨文件同文。
 
         过滤后可能返回空列表，此时调用方应给出兜底回答。
         """
@@ -106,22 +122,61 @@ class VectorStoreService:
         limit = (
             settings.retriever_max_per_source if max_per_source is None else max_per_source
         )
+        min_chars = (
+            getattr(settings, "retriever_min_chunk_chars", 0)
+            if min_chunk_chars is None
+            else min_chunk_chars
+        ) or 0
+        dedup_th = (
+            getattr(settings, "retriever_dedup_threshold", 0.0)
+            if dedup_threshold is None
+            else dedup_threshold
+        ) or 0.0
         filtering = threshold > 0.0
+        # 过短片段过滤和近似去重都会消耗名额，所以多取候选，最后再截到 k。
+        # 否则「同一段样板文字出现 5 次」会把 top_k 占满，返回的却是 1 条内容；
+        # 过滤偏严时还可能凑不满 top_k，留 5 倍余量。
+        fetch_k = k * 5 if (min_chars > 0 or dedup_th > 0.0) else k
 
         pairs = self._index.similarity_search_with_score_by_vector(
-            self._query_vector(query), k=k
+            self._query_vector(query), k=fetch_k
         )
 
         results: List[RetrievedDoc] = []
         per_source: Dict[str, int] = {}
         dropped = 0
+        dropped_short = 0
+        dropped_dup = 0
+        accepted_grams: List[set] = []
 
         for doc, distance in pairs:
+            if len(results) >= k:
+                break
             score = 1.0 - float(distance) / 2.0
             score = min(1.0, max(0.0, score))
             if filtering and score < threshold:
                 dropped += 1
                 continue
+
+            flat = "".join(doc.page_content.split())
+            # 纯「。」「..」「.7亿元」这类碎块没有信息量，白占上下文
+            if min_chars > 0 and len(flat) < min_chars:
+                dropped_short += 1
+                continue
+
+            grams = None
+            if dedup_th > 0.0:
+                # 不要在这里加「长度够长才去重」的门槛：最需要去重的恰恰是短块——
+                # 实测某站点 23 个页面尾部都是同一段 43 字符的地址行，
+                # 长这样的小块两两 Jaccard = 1.000，却会因为「太短」被漏掉。
+                window = flat[:3000]
+                grams = {
+                    zlib.crc32(window[i : i + 5].encode())
+                    for i in range(len(window) - 4)
+                }
+                if any(_jaccard(grams, g) >= dedup_th for g in accepted_grams):
+                    dropped_dup += 1
+                    continue
 
             source = str(
                 doc.metadata.get("source_file")
@@ -131,6 +186,8 @@ class VectorStoreService:
             if per_source.get(source, 0) >= limit:
                 continue
             per_source[source] = per_source.get(source, 0) + 1
+            if grams is not None:
+                accepted_grams.append(grams)
 
             results.append(
                 RetrievedDoc(
@@ -140,13 +197,14 @@ class VectorStoreService:
                 )
             )
 
-        if dropped:
+        if dropped or dropped_short or dropped_dup:
             logger.info(
-                "检索「%s」：命中 %d 条，丢弃 %d 条低相关结果（阈值 %.2f）",
+                "检索「%s」：返回 %d 条（低相关丢弃 %d，过短丢弃 %d，近似重复丢弃 %d）",
                 query,
                 len(results),
                 dropped,
-                threshold,
+                dropped_short,
+                dropped_dup,
             )
         return results
 
