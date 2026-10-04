@@ -18,6 +18,8 @@ data/raw_pdfs/
 data/raw_html/
 data/texts/
 data/index/
+# 重建索引前对现役索引的本地备份（约 45MB，纯构建产物，不入库）
+data/index.bak/
 data/wechat/
 data/.crawl_state.json
 docs/

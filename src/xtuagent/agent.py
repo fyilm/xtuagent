@@ -34,7 +34,9 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 
 from .core.config import settings
-from .rag.pipeline import WEB_DISCLAIMER, is_unanswerable
+from .core.lang import DEFAULT_LANGUAGE
+from .core.messages import fallback_answer, service_error, unhandled, web_disclaimer
+from .rag.pipeline import is_unanswerable
 from .rag.vector_store import RetrievedDoc
 from .rag.websearch import WebDoc
 from .rag.websearch import web_search as _web_search
@@ -177,12 +179,16 @@ def web_lookup(query: str, config: RunnableConfig) -> str:
     if not docs:
         return "互联网上也没有检索到与该问题相关的可靠资料。请如实告知学生。"
     _trace_from(config).add_web(docs)
-    return (
-        "以下内容来自互联网公开网页，**不是学校官方发布**，回答时必须先向学生说明这一点。\n\n"
-        + "\n\n---\n\n".join(
-            f"（来源：{d.label}｜{d.title[:60]}｜{d.link}）\n{d.content[:_SNIPPET_LIMIT]}"
-            for d in docs
-        )
+    # 只返回资料本身。
+    #
+    # 这里**绝不能**再夹带「回答时必须先向学生说明这一点」之类的元指令：
+    # 实测 glm-4-flash 会把工具返回的这段话原样抄进最终回答，学生看到的是
+    # 「以下内容来自互联网公开网页，不是学校官方发布，回答时必须先向学生说明这一点」——
+    # 一句对模型说的话，而不是对读者说的话。而且服务端还会再注入一次免责声明，变成两句。
+    # 声明该由提示词约束 + 服务端强制注入负责，工具的职责只有「给资料」。
+    return "\n\n---\n\n".join(
+        f"（来源：{d.label}｜{d.title[:60]}｜{d.link}）\n{d.content[:_SNIPPET_LIMIT]}"
+        for d in docs
     )
 
 
@@ -205,11 +211,20 @@ AGENT_SYSTEM_PROMPT = """你是湘潭大学智能学业助手，可以通过工�
 - 涉及课程、考试、规定的问题，必须先调用相应工具获取依据，不要凭记忆作答。
 - 当知识库工具返回"未找到"类提示时，**不要就此打住**：改用 web_lookup 到互联网再找一次，
   然后把查到的内容整理给学生。
-- 使用 web_lookup 的结果时，必须明确告诉学生"以下信息来自网络、非学校官方口径，
-  请以学校官方通知为准"，并给出可点击的来源网址。
-- 只有知识库和互联网都没有找到时，才如实告知学生"暂未收录"，并建议其向教务处、
-  网络与信息管理中心或辅导员确认。任何情况下都不要编造时间、地点、网址或人名。
-- 回答简洁准确，用中文回答，并在陈述事实后标注来源（如「来源：xxx」）。"""
+- **检索结果与问题无关，等同于「没找到」**。例如问「摩尔定律」，却只搜到一堆人名或
+  会议综述，那就是没找到——此时必须改用 web_lookup，**绝不能**把无关片段罗列出来
+  当作回答。宁可说一句「知识库里没有」，也不要拿凑数的内容糊弄学生。
+- 使用 web_lookup 的结果时，**不要自己写"内容来自网络"的声明**：系统会随回答自动加上
+  这一句「{disclaimer}」。你直接进入正文，并给出可点击的来源网址即可。
+- 只有知识库和互联网都没有找到时，才如实回复"{refusal}"。
+  任何情况下都不要编造时间、地点、网址或人名。
+- 寒暄、纯计算、通用常识（"你是谁"、"1+1 等于几"）可以直接作答，不必强行检索知识库。
+- 但凡是**需要外部事实**的问题——天气、新闻、时间地点、价格、赛事、政策最新动态——
+  **必须先调用 web_lookup 查证再答**，绝不许凭记忆作答：这类问题凭记忆答等于编造。
+  实测教训：直接凭记忆报天气温度，报出来的数是错的。
+- **没调用过 web_lookup 就不要说"我从网上找到了"**，也不要贴任何没在工具结果里出现过的
+  链接——系统只在确实读过联网资料时才加"内容来自网络"的声明。
+- 回答简洁准确，使用{language}语言，并在陈述事实后标注来源（如「来源：xxx」）。"""
 
 
 
@@ -228,18 +243,43 @@ class AgentAssistant:
 
         from .rag.llm import create_llm
 
-        self._agent = create_agent(
-            model=create_llm(),
-            tools=AGENT_TOOLS,
-            system_prompt=AGENT_SYSTEM_PROMPT,
-        )
+        self._create_agent = create_agent
+        # 模型客户端只需要一个，各语言的 Agent 共用它。
+        self._model = create_llm()
+        self._agents: dict = {}
+        self._agents_lock = threading.Lock()
 
-    def run(self, user_input: str) -> AgentAnswer:
+    def _agent_for(self, language: str):
+        """按语言取 Agent 实例（首次构建后缓存）。
+
+        为什么要按语言分开：系统提示词里写死了「用哪种语言回答」和「拒答时照抄哪句话」，
+        两者都随提问语言变化。语言只有有限的几种，构建一次就该复用，
+        否则每个请求重建 Agent 又要重新初始化一遍模型客户端。
+        """
+        agent = self._agents.get(language)
+        if agent is not None:
+            return agent
+        with self._agents_lock:
+            agent = self._agents.get(language)
+            if agent is None:
+                agent = self._create_agent(
+                    model=self._model,
+                    tools=AGENT_TOOLS,
+                    system_prompt=AGENT_SYSTEM_PROMPT.format(
+                        language=language,
+                        refusal=fallback_answer(language),
+                        disclaimer=web_disclaimer(language).strip(),
+                    ),
+                )
+                self._agents[language] = agent
+        return agent
+
+    def run(self, user_input: str, language: str = DEFAULT_LANGUAGE) -> AgentAnswer:
         # 每次请求新建一个轨迹，放进 config 里随调用链下传。
         # 工具可能在 worker 线程执行，但 config 会被 LangChain 一并带过去。
         trace = _RetrievalTrace()
         try:
-            result = self._agent.invoke(
+            result = self._agent_for(language).invoke(
                 {"messages": [{"role": "user", "content": user_input}]},
                 config={
                     "recursion_limit": MAX_TOOL_ROUNDS * 2,
@@ -249,12 +289,12 @@ class AgentAssistant:
         except Exception:  # noqa: BLE001
             logger.exception("Agent 调用失败：%s", user_input)
             return AgentAnswer(
-                text="抱歉，本次查询未能完成，请稍后重试或改用普通问答模式。",
+                text=service_error(language),
                 sources=list(trace.docs),
                 web_sources=list(trace.web_docs),
             )
 
-        text = "无法处理该请求。"
+        text = unhandled(language)
         messages = result.get("messages", []) if isinstance(result, dict) else []
         if messages:
             last = messages[-1]
@@ -267,26 +307,26 @@ class AgentAssistant:
             # 模型只说"没收录"却没去联网 —— 不能就这么把用户打发了。
             # 提示词里虽然写了"改用 web_lookup"，但那是**请求**不是**保证**，
             # 所以这里补一道确定性兜底：直接调用流水线的联网作答。
-            fallback = self._web_fallback(user_input)
+            fallback = self._web_fallback(user_input, language)
             if fallback is not None:
                 return fallback
 
         if web_docs:
             # 与普通问答一致：只要联网资料被读过，就由服务端强制打上来源声明，
             # 不指望模型自己记得写（实测它会漏）。
-            text = WEB_DISCLAIMER + text
+            text = web_disclaimer(language) + text
 
         return AgentAnswer(text=text, sources=list(trace.docs), web_sources=web_docs)
 
     @staticmethod
-    def _web_fallback(user_input: str) -> Optional[AgentAnswer]:
+    def _web_fallback(user_input: str, language: str = DEFAULT_LANGUAGE) -> Optional[AgentAnswer]:
         from .serving.container import container
 
         pipeline = getattr(container, "pipeline", None)
         if pipeline is None:
             return None
         logger.info("Agent 未联网即判定未收录，补一次确定性联网兜底：%s", user_input)
-        answer = pipeline.answer_with_web(user_input)
+        answer = pipeline.answer_with_web(user_input, language)
         if answer is None:
             return None
         return AgentAnswer(

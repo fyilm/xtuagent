@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>XtuAgent · 校园智能学业问答系统</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='80' font-size='80'>🎓</text></svg>">
+  <title>XtuAgent · 校园智能学业问答</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%230d0d0d' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M22 10 12 5 2 10l10 5 10-5z'/><path d='M6 12v5c0 1.7 2.7 3 6 3s6-1.3 6-3v-5'/></svg>">
   <!-- 资源地址里的 {{BUILD}} 由后端注入（serving/app.py 的 static_build_id）。
        前端文件一变，构建号就变，URL 随之改变，浏览器必然重新拉取——
        无需人工维护版本号，也无需用户手动清缓存。 -->
@@ -14,79 +14,68 @@
 <body>
   <div class="app">
     <aside class="sidebar">
-      <div class="brand">
-        <div class="logo">X</div>
-        <div class="brand-text">
-          <h1>XtuAgent</h1>
-          <p>校园智能学业问答系统</p>
-        </div>
-      </div>
-
-      <div class="status-card" id="statusCard">
-        <span class="dot loading" id="statusDot"></span>
-        <div class="status-info">
-          <span class="status-title" id="statusText">正在连接服务…</span>
-          <span class="status-sub" id="statusSub">初始化中</span>
-        </div>
-      </div>
-
-      <div class="panel">
-        <label class="panel-label">回答语言 / Language</label>
-        <select id="langSelect" class="select">
-          <option value="中文">中文</option>
-          <option value="English">English</option>
-        </select>
-      </div>
-
-      <div class="panel">
-        <label class="panel-label">检索模式</label>
-        <label class="switch-row" for="agentToggle">
-          <input type="checkbox" id="agentToggle">
-          <span class="switch-text">
-            <span class="switch-title">工具增强模式</span>
-            <span class="switch-desc">模型自主调用检索/规定原文工具，适合多步查找，响应稍慢</span>
+      <div class="sidebar-head">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M22 10 12 5 2 10l10 5 10-5z"></path>
+              <path d="M6 12v5c0 1.7 2.7 3 6 3s6-1.3 6-3v-5"></path>
+            </svg>
           </span>
+          <span class="brand-name">XtuAgent</span>
+        </div>
+
+        <button class="btn-new" id="clearBtn" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+            <path d="M12 5v14"></path>
+            <path d="M5 12h14"></path>
+          </svg>
+          <span>新对话</span>
+        </button>
+      </div>
+
+      <div class="sidebar-foot">
+        <label class="agent-toggle" for="agentToggle">
+          <span class="agent-toggle-text">
+            <span class="agent-toggle-title">工具增强模式</span>
+            <span class="agent-toggle-desc">模型自主调用检索工具，适合需要多步查找的问题</span>
+          </span>
+          <input type="checkbox" id="agentToggle">
+          <span class="switch" aria-hidden="true"></span>
         </label>
-      </div>
 
-      <div class="panel">
-        <label class="panel-label">试试这些问题</label>
-        <div class="examples" id="examples"></div>
-      </div>
-
-      <div class="sidebar-footer">
-        <button class="btn-ghost" id="clearBtn">清空对话</button>
-        <p class="tech-note" id="techNote">GLM-4-Flash · bge-base-zh · FAISS</p>
+        <div class="status" id="statusCard">
+          <span class="dot loading" id="statusDot"></span>
+          <span class="status-text" id="statusText">正在连接服务…</span>
+        </div>
       </div>
     </aside>
 
     <main class="chat">
       <div class="messages" id="messages">
         <div class="hero" id="hero">
-          <div class="hero-glow"></div>
-          <div class="hero-logo">🎓</div>
-          <h2>你好，我是湘潭大学学业助手</h2>
-          <p>基于校园私域知识库的 RAG 问答系统<br>学业规定 · 课程指南 · 办事流程，有问必答</p>
-          <div class="hero-tags">
-            <span>📋 教务规定</span>
-            <span>🎓 学籍管理</span>
-            <span>💻 软件教程</span>
-            <span>🏫 校园服务</span>
-          </div>
+          <span class="hero-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M22 10 12 5 2 10l10 5 10-5z"></path>
+              <path d="M6 12v5c0 1.7 2.7 3 6 3s6-1.3 6-3v-5"></path>
+            </svg>
+          </span>
+          <h2>有什么可以帮你？</h2>
+          <p>学业规定 · 学籍管理 · 课程指南 · 办事流程<br>用你自己的语言提问就可以</p>
         </div>
       </div>
 
       <div class="composer-wrap">
         <div class="composer">
-          <textarea id="input" rows="1" placeholder="输入你的学业问题…（Enter 发送，Shift+Enter 换行）"></textarea>
-          <button class="btn-send" id="sendBtn" title="发送">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M22 2L11 13"></path>
-              <path d="M22 2l-7 20-4-9-9-4 20-7z"></path>
+          <textarea id="input" rows="1" placeholder="给学业助手发消息…"></textarea>
+          <button class="btn-send" id="sendBtn" type="button" title="发送" aria-label="发送">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 19V5"></path>
+              <path d="M5 12l7-7 7 7"></path>
             </svg>
           </button>
         </div>
-        <p class="composer-hint">回答由 AI 生成，优先依据校内知识库；涉及网络检索的内容会明确标注，重要信息请以学校官方文件为准</p>
+        <p class="composer-hint">回答由 AI 生成，重要信息请以学校官方文件为准</p>
       </div>
     </main>
   </div>

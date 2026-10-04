@@ -137,7 +137,7 @@ def agent_ask(req: AskRequest) -> dict:
     from ..agent import get_assistant
 
     start = time.time()
-    result = get_assistant().run(req.question.strip())
+    result = get_assistant().run(req.question.strip(), req.language)
     sources = RAGPipeline._kb_source_payload(result.sources) + (
         RAGPipeline._web_source_payload(result.web_sources)
     )
@@ -146,6 +146,7 @@ def agent_ask(req: AskRequest) -> dict:
         "sources": sources,
         "elapsed_ms": int((time.time() - start) * 1000),
         "mode": "web" if result.web_sources else "kb",
+        "language": req.language,
     }
 
 

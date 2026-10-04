@@ -26,34 +26,168 @@ const els = {
   statusCard: $("statusCard"),
   statusDot: $("statusDot"),
   statusText: $("statusText"),
-  statusSub: $("statusSub"),
-  langSelect: $("langSelect"),
   agentToggle: $("agentToggle"),
-  examples: $("examples"),
   clearBtn: $("clearBtn"),
   messages: $("messages"),
   hero: $("hero"),
   input: $("input"),
   sendBtn: $("sendBtn"),
   toast: $("toast"),
-  techNote: $("techNote"),
 };
 
-const EXAMPLES = [
-  "考试作弊会有什么处分？",
-  "如何办理休学手续？",
-  "奖学金申请的流程是什么？",
-  "休学后还能复学吗？",
-  "学分制是怎么回事？",
-  "校园网 VPN 怎么使用？",
-];
+/* 助手标记：与侧边栏品牌同一个图形，避免界面里出现两套视觉符号 */
+const ASSISTANT_MARK =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" ' +
+  'stroke-linecap="round" stroke-linejoin="round">' +
+  '<path d="M22 10 12 5 2 10l10 5 10-5z"></path>' +
+  '<path d="M6 12v5c0 1.7 2.7 3 6 3s6-1.3 6-3v-5"></path></svg>';
+
+/* ============ 提问语言识别 ============ */
+
+/* 与 `src/xtuagent/core/lang.py` 是同一套规则，改一处要同步另一处。
+ *
+ * 后端已经把 language 回传过来了（done 事件 / /api/agent 响应），
+ * 这里还要在前端再判一次的原因：**打字机提示、错误提示在拿到响应之前就要显示**，
+ * 那时候后端还没说话。
+ *
+ * 顺序不能变：假名 → 谚文 → 汉字。日文句子必然夹假名，
+ * 而汉字区间会同时命中中日文，先判汉字会把日文提问认成中文。 */
+const KANA = /[\u3040-\u309f\u30a0-\u30ff]/;
+const HANGUL = /[\uac00-\ud7af\u1100-\u11ff]/;
+const HAN = /[\u4e00-\u9fff\u3400-\u4dbf]/;
+const CYRILLIC = /[\u0400-\u04ff]/;
+const LATIN = /[A-Za-z]/;
+const DEFAULT_LANG = "中文";
+
+function detectLang(text) {
+  if (!text) return DEFAULT_LANG;
+  if (KANA.test(text)) return "日语";
+  if (HANGUL.test(text)) return "韩语";
+  if (HAN.test(text)) return "中文";
+  if (CYRILLIC.test(text)) return "俄语";
+  if (LATIN.test(text)) return "英语";
+  return DEFAULT_LANG;
+}
+
+/* ============ 回答区文案 ============ */
+
+/* 边界：**回答气泡里的所有文字都跟着回答语言走**，包括来源卡片、结尾提示、
+ * 报错。应用外壳（按钮、占位符、状态条、侧边栏）保持中文——
+ * 那些在提问之前就存在，跟回答语言无关，跟着变只会让人以为界面在乱跳。 */
+const UI_TEXT = {
+  中文: {
+    sourcesTitle: "参考来源",
+    kbSummary: "知识库 {n} 条",
+    webSummary: "网络 {n} 条",
+    badgeKb: "知识库",
+    badgeWeb: "网络",
+    sourceUnknown: "未知来源",
+    sourceWeb: "网络来源",
+    simScore: "相似度 {n}%",
+    webPage: "网页",
+    metaWeb: "知识库未收录，已联网检索 {n} 条",
+    metaRefused: "知识库与网络均未找到依据",
+    metaAgentWeb: "已联网检索 {n} 条",
+    metaAgentNone: "未命中任何来源",
+    agentHint: "正在检索知识库…",
+    noAnswer: "（无回答）",
+    errorPrefix: "出错了：",
+    requestFailed: "请求失败",
+  },
+  英语: {
+    sourcesTitle: "Sources",
+    kbSummary: "knowledge base {n}",
+    webSummary: "web {n}",
+    badgeKb: "Knowledge base",
+    badgeWeb: "Web",
+    sourceUnknown: "Unknown source",
+    sourceWeb: "Web source",
+    simScore: "similarity {n}%",
+    webPage: "Web page",
+    metaWeb: "Not in the knowledge base — searched the web, {n} result(s)",
+    metaRefused: "No basis found in the knowledge base or on the web",
+    metaAgentWeb: "Searched the web — {n} result(s)",
+    metaAgentNone: "No sources matched",
+    agentHint: "Searching the knowledge base…",
+    noAnswer: "(no answer)",
+    errorPrefix: "Error: ",
+    requestFailed: "Request failed",
+  },
+  日语: {
+    sourcesTitle: "参考資料",
+    kbSummary: "ナレッジベース {n}件",
+    webSummary: "ウェブ {n}件",
+    badgeKb: "ナレッジベース",
+    badgeWeb: "ウェブ",
+    sourceUnknown: "不明なソース",
+    sourceWeb: "ウェブソース",
+    simScore: "類似度 {n}%",
+    webPage: "ウェブページ",
+    metaWeb: "学内ナレッジベースに未収録のため、ウェブで {n} 件検索しました",
+    metaRefused: "ナレッジベースにもウェブにも根拠が見つかりませんでした",
+    metaAgentWeb: "ウェブで {n} 件検索しました",
+    metaAgentNone: "該当するソースがありません",
+    agentHint: "ナレッジベースを検索しています…",
+    noAnswer: "（回答なし）",
+    errorPrefix: "エラー：",
+    requestFailed: "リクエストに失敗しました",
+  },
+  韩语: {
+    sourcesTitle: "출처",
+    kbSummary: "지식 베이스 {n}건",
+    webSummary: "웹 {n}건",
+    badgeKb: "지식 베이스",
+    badgeWeb: "웹",
+    sourceUnknown: "알 수 없는 출처",
+    sourceWeb: "웹 출처",
+    simScore: "유사도 {n}%",
+    webPage: "웹 페이지",
+    metaWeb: "교내 지식 베이스에 없어 웹에서 {n}건을 검색했습니다",
+    metaRefused: "지식 베이스와 웹 모두에서 근거를 찾지 못했습니다",
+    metaAgentWeb: "웹에서 {n}건을 검색했습니다",
+    metaAgentNone: "일치하는 출처가 없습니다",
+    agentHint: "지식 베이스를 검색하는 중…",
+    noAnswer: "(답변 없음)",
+    errorPrefix: "오류: ",
+    requestFailed: "요청 실패",
+  },
+  俄语: {
+    sourcesTitle: "Источники",
+    kbSummary: "база знаний: {n}",
+    webSummary: "интернет: {n}",
+    badgeKb: "База знаний",
+    badgeWeb: "Интернет",
+    sourceUnknown: "Неизвестный источник",
+    sourceWeb: "Веб-источник",
+    simScore: "сходство {n}%",
+    webPage: "Веб-страница",
+    metaWeb: "Нет в базе знаний — поиск в интернете, {n} результат(ов)",
+    metaRefused: "Ни в базе знаний, ни в интернете оснований не найдено",
+    metaAgentWeb: "Поиск в интернете — {n} результат(ов)",
+    metaAgentNone: "Подходящих источников не найдено",
+    agentHint: "Поиск в базе знаний…",
+    noAnswer: "(нет ответа)",
+    errorPrefix: "Ошибка: ",
+    requestFailed: "Запрос не выполнен",
+  },
+};
+
+/* 取回答区文案。语言没收录时退回中文——宁可一句语言不对，也不要让界面空掉。 */
+function t(lang, key, vars) {
+  const table = UI_TEXT[lang] || UI_TEXT[DEFAULT_LANG];
+  let s = table[key];
+  if (s === undefined) s = UI_TEXT[DEFAULT_LANG][key];
+  if (vars) {
+    for (const k of Object.keys(vars)) s = s.split(`{${k}}`).join(vars[k]);
+  }
+  return s;
+}
 
 /* ============ 状态轮询 ============ */
 
-function setStatus(kind, title, sub) {
+function setStatus(kind, text) {
   els.statusDot.className = `dot ${kind}`;
-  els.statusText.textContent = title;
-  els.statusSub.textContent = sub || "";
+  els.statusText.textContent = text;
 }
 
 async function pollHealth() {
@@ -62,24 +196,24 @@ async function pollHealth() {
     const data = await resp.json();
     if (data.status === "ready") {
       state.ready = true;
-      setStatus("ready", "服务就绪", `知识库 ${data.index_count} 条 · ${data.model}`);
+      setStatus("ready", "服务就绪");
       els.sendBtn.disabled = false;
       return true;
     }
     if (data.status === "error") {
-      setStatus("error", "服务异常", data.error || "请运行自检脚本排查");
+      setStatus("error", data.error || "服务异常，请查看后端日志");
       return true;
     }
-    setStatus("loading", "模型预热中…", "首次启动约需 1 分钟");
+    setStatus("loading", "模型预热中，首次启动约需 1 分钟");
     return false;
   } catch {
-    setStatus("error", "无法连接服务", "请确认后端已启动");
+    setStatus("error", "无法连接服务，请确认后端已启动");
     return false;
   }
 }
 
 async function init() {
-  setStatus("loading", "正在连接服务…", "初始化中");
+  setStatus("loading", "正在连接服务…");
   els.sendBtn.disabled = true;
 
   const done = await pollHealth();
@@ -89,33 +223,6 @@ async function init() {
       if (ready) clearInterval(timer);
     }, 2000);
   }
-
-  try {
-    const resp = await fetch(API.stats);
-    const data = await resp.json();
-    const model = (data.meta && data.meta.embedding_model) || data.embedding_model || "bge-base-zh";
-    const short = model.split("/").pop();
-    els.techNote.textContent =
-      `${short} · 阈值 ${data.score_threshold ?? "-"} · ${data.model || "GLM"} · 构建 ${APP_BUILD}`;
-  } catch {
-    els.techNote.textContent = `构建 ${APP_BUILD}`;
-  }
-}
-
-/* ============ 示例问题 ============ */
-
-function renderExamples() {
-  EXAMPLES.forEach((q) => {
-    const btn = document.createElement("button");
-    btn.className = "example-item";
-    btn.textContent = q;
-    btn.addEventListener("click", () => {
-      if (!state.ready || state.streaming) return;
-      els.input.value = q;
-      send();
-    });
-    els.examples.appendChild(btn);
-  });
 }
 
 /* ============ Markdown 轻量渲染 ============ */
@@ -274,19 +381,22 @@ function appendMessage(role, content) {
   const wrapper = document.createElement("div");
   wrapper.className = `msg ${role}`;
 
-  const avatar = document.createElement("div");
-  avatar.className = "msg-avatar";
-  avatar.textContent = role === "user" ? "🧑" : "🎓";
-
   const body = document.createElement("div");
   body.className = "msg-body";
 
   const contentEl = document.createElement("div");
   contentEl.className = "msg-content";
   contentEl.innerHTML = role === "user" ? escapeHtml(content) : content;
-
   body.appendChild(contentEl);
-  wrapper.appendChild(avatar);
+
+  // 只有助手消息带标记：用户消息靠右对齐的浅灰气泡就够区分了，再加头像反而啰嗦
+  if (role === "assistant") {
+    const avatar = document.createElement("div");
+    avatar.className = "msg-avatar";
+    avatar.innerHTML = ASSISTANT_MARK;
+    wrapper.appendChild(avatar);
+  }
+
   wrapper.appendChild(body);
   els.messages.appendChild(wrapper);
   scrollToBottom();
@@ -301,20 +411,21 @@ function scrollToBottom() {
  *
  * 网络来源的标题、站点名、URL 全部来自外部网页，一律用 textContent 赋值，
  * 绝不拼 HTML 字符串——否则一个恶意网页标题就能注入脚本。 */
-function renderSources(body, sources) {
+function renderSources(body, sources, lang) {
   if (!sources || sources.length === 0) return;
   const kbCount = sources.filter((s) => s.kind !== "web").length;
   const webCount = sources.length - kbCount;
   const summary = [];
-  if (kbCount) summary.push(`知识库 ${kbCount} 条`);
-  if (webCount) summary.push(`网络 ${webCount} 条`);
+  if (kbCount) summary.push(t(lang, "kbSummary", { n: kbCount }));
+  if (webCount) summary.push(t(lang, "webSummary", { n: webCount }));
 
   const card = document.createElement("div");
   card.className = "sources";
   const header = document.createElement("div");
   header.className = "sources-header";
   header.innerHTML = `<span class="arrow">▶</span><span></span>`;
-  header.lastElementChild.textContent = `参考来源 · ${summary.join(" / ")}`;
+  header.lastElementChild.textContent =
+    `${t(lang, "sourcesTitle")} · ${summary.join(" / ")}`;
   header.addEventListener("click", () => card.classList.toggle("open"));
 
   const list = document.createElement("div");
@@ -330,11 +441,12 @@ function renderSources(body, sources) {
 
     const badge = document.createElement("span");
     badge.className = "source-badge";
-    badge.textContent = isWeb ? "网络" : "知识库";
+    badge.textContent = t(lang, isWeb ? "badgeWeb" : "badgeKb");
 
     const name = document.createElement(isWeb && s.url ? "a" : "span");
     name.className = "source-name";
-    name.textContent = s.file || (isWeb ? "网络来源" : "未知来源");
+    name.textContent =
+      s.file || t(lang, isWeb ? "sourceWeb" : "sourceUnknown");
     if (isWeb && s.url) {
       name.href = s.url;
       name.target = "_blank";
@@ -345,8 +457,8 @@ function renderSources(body, sources) {
     const score = document.createElement("span");
     score.className = "source-score";
     score.textContent = isWeb
-      ? s.publish_date || "网页"
-      : `相似度 ${((s.score || 0) * 100).toFixed(0)}%`;
+      ? s.publish_date || t(lang, "webPage")
+      : t(lang, "simScore", { n: ((s.score || 0) * 100).toFixed(0) });
 
     head.append(badge, name, score);
     item.appendChild(head);
@@ -412,7 +524,8 @@ async function send() {
   const typing = makeTyping();
   contentEl.appendChild(typing);
 
-  const ctx = { question, body, contentEl, typing };
+  // 提问语言在这里判一次带进 ctx：打字机提示、报错都要在响应回来之前就定语言。
+  const ctx = { question, lang: detectLang(question), body, contentEl, typing };
 
   try {
     if (els.agentToggle.checked) {
@@ -455,13 +568,16 @@ async function runStreamMode(ctx) {
   const resp = await fetch(API.askStream, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question, language: els.langSelect.value }),
+    // language 交给后端按提问内容自动判定（见 serving/schemas.py 的 _resolve_language）
+    body: JSON.stringify({ question, language: "auto" }),
   });
 
   if (!resp.ok) {
     const detail = await resp.json().catch(() => ({}));
     typing.remove();
-    contentEl.innerHTML = `<p style="color:#f87171">出错了：${escapeHtml(detail.detail || `请求失败 (${resp.status})`)}</p>`;
+    const msg = detail.detail || `${t(ctx.lang, "requestFailed")} (${resp.status})`;
+    contentEl.innerHTML =
+      `<p style="color:#f87171">${escapeHtml(t(ctx.lang, "errorPrefix") + msg)}</p>`;
     return;
   }
 
@@ -490,6 +606,7 @@ async function runStreamMode(ctx) {
         body,
         contentEl,
         typing,
+        lang: ctx.lang,
         get answerText() { return answerText; },
         set answerText(v) { answerText = v; },
         get sources() { return sources; },
@@ -503,19 +620,23 @@ async function runStreamMode(ctx) {
   }
 }
 
-function describeDone(event, kbCount, webCount) {
-  const bits = [`耗时 ${((event.elapsed_ms || 0) / 1000).toFixed(1)}s`];
+/* 结尾提示只在「值得让用户知道」时才出现。
+ * 正常走知识库的情况，来源卡片里已经写明条数，这里再补一行「耗时 x.xs · 检索 N 条」
+ * 属于重复信息，只会让界面变吵。只有联网兜底/完全无依据这类需要用户警觉的情况才提示。
+ * 文案跟着回答语言走（lang），否则英文回答底下挂一句中文提示。 */
+function describeDone(event, kbCount, webCount, lang) {
   if (event.mode === "web") {
-    bits.push(`知识库未收录 · 已联网检索 ${webCount} 条`);
-  } else if (event.mode === "refused") {
-    bits.push("知识库与网络均未找到依据");
-  } else {
-    bits.push(`检索 ${kbCount} 条来源`);
+    return t(lang, "metaWeb", { n: webCount });
   }
-  return bits.join(" · ");
+  if (event.mode === "refused") {
+    return t(lang, "metaRefused");
+  }
+  return "";
 }
 
 function handleStreamEvent(event, ctx) {
+  // 后端在 done 事件里回报它实际用的语言；中途的事件先按提问语言渲染。
+  const lang = event.language || ctx.lang;
   if (event.type === "sources") {
     ctx.sources = event.sources || [];
   } else if (event.type === "web_sources") {
@@ -523,13 +644,14 @@ function handleStreamEvent(event, ctx) {
   } else if (event.type === "reset") {
     // 模型先吐了拒答话术，随后才判定该转联网 —— 把已渲染内容整个抹掉重来。
     // 抹掉是必须的：留着「暂未找到相关信息」再补一段网络答案，用户会以为自相矛盾。
+    // 状态文字不在这里写死：紧跟其后的 status 事件会带来本地化版本。
     ctx.answerText = "";
     ctx.sources = [];
     ctx.webSources = [];
     if (ctx.typing.parentNode) ctx.typing.remove();
     ctx.contentEl.innerHTML = "";
     ctx.body.querySelectorAll(".sources, .msg-meta").forEach((n) => n.remove());
-    ctx.setStatus("校内知识库未收录，正在联网检索…");
+    ctx.clearStatus();
     scrollToBottom();
   } else if (event.type === "status") {
     ctx.setStatus(event.text);
@@ -544,13 +666,15 @@ function handleStreamEvent(event, ctx) {
     if (ctx.typing.parentNode) ctx.typing.remove();
     ctx.contentEl.innerHTML = renderMarkdown(ctx.answerText);
     const all = ctx.sources.concat(ctx.webSources);
-    if (all.length) renderSources(ctx.body, all);
-    appendMeta(ctx.body, describeDone(event, ctx.sources.length, ctx.webSources.length));
+    if (all.length) renderSources(ctx.body, all, lang);
+    const note = describeDone(event, ctx.sources.length, ctx.webSources.length, lang);
+    if (note) appendMeta(ctx.body, note);
     scrollToBottom();
   } else if (event.type === "error") {
     ctx.clearStatus();
     if (ctx.typing.parentNode) ctx.typing.remove();
-    ctx.contentEl.innerHTML = `<p style="color:#f87171">生成失败：${escapeHtml(event.message)}</p>`;
+    ctx.contentEl.innerHTML =
+      `<p style="color:#f87171">${escapeHtml(t(lang, "errorPrefix") + event.message)}</p>`;
   }
 }
 
@@ -561,8 +685,8 @@ async function runAgentMode(ctx) {
   typing.remove();
 
   const hint = document.createElement("div");
-  hint.className = "msg-meta";
-  hint.textContent = "工具增强模式：正在检索知识库…";
+  hint.className = "msg-status";
+  hint.textContent = t(ctx.lang, "agentHint");
   contentEl.appendChild(hint);
   scrollToBottom();
 
@@ -571,27 +695,31 @@ async function runAgentMode(ctx) {
     const resp = await fetch(API.agent, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question, language: els.langSelect.value }),
+      // language 交给后端按提问内容自动判定
+      body: JSON.stringify({ question, language: "auto" }),
     });
     if (!resp.ok) {
       const detail = await resp.json().catch(() => ({}));
-      throw new Error(detail.detail || `请求失败 (${resp.status})`);
+      const msg = detail.detail || `${t(ctx.lang, "requestFailed")} (${resp.status})`;
+      throw new Error(msg);
     }
     data = await resp.json();
   } catch (error) {
-    contentEl.innerHTML = `<p style="color:#f87171">出错了：${escapeHtml(error.message)}</p>`;
+    contentEl.innerHTML =
+      `<p style="color:#f87171">${escapeHtml(t(ctx.lang, "errorPrefix") + error.message)}</p>`;
     return;
   }
 
-  contentEl.innerHTML = renderMarkdown(data.answer || "（无回答）");
-  if (data.sources && data.sources.length) renderSources(body, data.sources);
+  const lang = data.language || ctx.lang;
+  contentEl.innerHTML = renderMarkdown(data.answer || t(lang, "noAnswer"));
+  if (data.sources && data.sources.length) renderSources(body, data.sources, lang);
   const kbCount = (data.sources || []).filter((s) => s.kind !== "web").length;
   const webCount = (data.sources || []).length - kbCount;
-  const parts = [`耗时 ${((data.elapsed_ms || 0) / 1000).toFixed(1)}s`];
-  if (kbCount) parts.push(`知识库 ${kbCount} 条`);
-  if (webCount) parts.push(`联网 ${webCount} 条`);
-  if (!kbCount && !webCount) parts.push("未命中任何来源");
-  appendMeta(body, `工具增强模式 · ${parts.join(" · ")}`);
+  // 与流式模式保持一致：来源条数由来源卡片表达，这里只提需要用户警觉的情况
+  const parts = [];
+  if (webCount) parts.push(t(lang, "metaAgentWeb", { n: webCount }));
+  if (!kbCount && !webCount) parts.push(t(lang, "metaAgentNone"));
+  if (parts.length) appendMeta(body, parts.join(" · "));
   scrollToBottom();
 }
 
@@ -622,6 +750,5 @@ els.clearBtn.addEventListener("click", () => {
 
 /* ============ 启动 ============ */
 
-renderExamples();
 init();
 els.input.focus();

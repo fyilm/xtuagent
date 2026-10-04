@@ -10,6 +10,7 @@ import pytest
 from langchain_core.runnables import RunnableLambda, RunnableGenerator
 
 from xtuagent.core.config import settings
+from xtuagent.core.messages import fallback_answer, web_disclaimer, web_status
 from xtuagent.rag import pipeline as pipeline_mod
 from xtuagent.rag.pipeline import (
     FALLBACK_ANSWER,
@@ -320,3 +321,103 @@ def test_ask_stream_web_sources_payload_shape(web_on, stub_search):
             "publish_date": "",
         }
     ]
+
+
+# ---------------------------------------------------------------------------
+# 多语言：话术必须跟着回答语言走
+# ---------------------------------------------------------------------------
+
+
+def test_english_question_refusal_triggers_web_fallback(web_on, stub_search):
+    """英文拒答必须能触发联网兜底。
+
+    真实事故：语言改为「按提问自动识别」后，模型开始用英文拒答，
+    而当时的拒答正则是清一色中文 → 识别不出来 → 英文提问**永远**走不到联网兜底。
+    """
+    english_refusal = fallback_answer("英语")
+    p = RAGPipeline(StubVectorStore(), llm=make_llm(english_refusal))
+
+    answer = p.ask("Where can I download MATLAB?", language="英语")
+
+    assert is_unanswerable(english_refusal)
+    assert answer.mode == "web"
+    assert stub_search == ["Where can I download MATLAB?"]
+
+
+def test_english_disclaimer_is_injected_in_english(web_on, stub_search):
+    p = RAGPipeline(StubVectorStore(docs=[]), llm=make_llm("It is available here [1]."))
+
+    answer = p.ask("Where can I download MATLAB?", language="英语")
+
+    assert answer.text.startswith(web_disclaimer("英语"))
+    assert "not officially published" in answer.text
+    assert WEB_DISCLAIMER not in answer.text, "英文回答前不该出现中文免责声明"
+
+
+def test_english_fallback_answer_is_english(stub_search):
+    """知识库与网络都没辙时，兜底话术也要是提问者看得懂的语言。"""
+    p = RAGPipeline(StubVectorStore(docs=[]), llm=make_llm())
+
+    answer = p.ask("Where can I download MATLAB?", language="英语")
+
+    assert answer.mode == "refused"
+    assert answer.text == fallback_answer("英语")
+    assert FALLBACK_ANSWER not in answer.text
+
+
+def test_stream_done_event_reports_language(web_on, stub_search):
+    """前端要靠这个字段把来源卡片、结尾提示切到对应语言。"""
+    p = RAGPipeline(StubVectorStore(), llm=make_stream_llm(["The GPA ", "threshold is 1.5 [1]."]))
+
+    events = list(p.ask_stream("What is the GPA requirement?", language="英语"))
+
+    assert events[-1]["language"] == "英语"
+
+
+def test_stream_status_and_reset_are_localised(web_on, stub_search):
+    english_refusal = fallback_answer("英语")
+    p = RAGPipeline(StubVectorStore(), llm=make_llm(english_refusal, "Web answer [1]."))
+
+    events = list(p.ask_stream("Where can I download MATLAB?", language="英语"))
+
+    status = next(e["text"] for e in events if e["type"] == "status")
+    assert status == web_status("英语", len([WEB_DOC]))
+    assert "已联网检索" not in status
+
+
+def test_explicit_language_never_changes_kb_behaviour(web_on, stub_search):
+    """语言只影响话术，不该影响「答得出来就绝不联网」这条成本底线。"""
+    p = RAGPipeline(StubVectorStore(), llm=make_llm("GPA below 1.5 triggers a warning [1]."))
+
+    answer = p.ask("What is the GPA requirement?", language="英语")
+
+    assert answer.mode == "kb"
+    assert stub_search == []
+
+
+def test_system_prompt_asks_model_to_refuse_in_the_right_language():
+    """提示词里那句「照抄」的拒答，必须是提问语言的版本。
+
+    否则模型被要求照抄一句中文——要么中英夹杂，要么自己改写，两条路都糟。
+    """
+    from xtuagent.rag.pipeline import SYSTEM_PROMPT
+
+    rendered = SYSTEM_PROMPT.format(
+        context="（知识库片段）", language="英语", refusal=fallback_answer("英语")
+    )
+    assert fallback_answer("英语") in rendered
+    assert fallback_answer("中文") not in rendered
+
+
+def test_system_prompt_tells_model_to_translate_not_refuse():
+    """知识库是中文的，外文提问不能因此被判「没依据」。
+
+    实测：英文问「What is the GPA warning threshold?」检索分数 0.78（与中文提问同级），
+    但模型看到的是中文原文，倾向于回一句拒答 → 白白触发一次付费联网检索。
+    这条断言把「照翻译，别说没有」这句话钉在提示词里。
+    """
+    from xtuagent.rag.pipeline import SYSTEM_PROMPT, WEB_SYSTEM_PROMPT
+
+    kb = SYSTEM_PROMPT.format(context="x", language="英语", refusal="y")
+    assert "翻译" in kb
+    assert "翻译" in WEB_SYSTEM_PROMPT
